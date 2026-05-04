@@ -30,7 +30,7 @@ let parse_address (s : string) : address =
     end
 
 let default_allowed_networks =
-  List.filter_map [ "127.0.0.0/8"; "::1/128" ] ~f:Cidr.parse
+  List.map [ "127.0.0.0/8"; "::1/128" ] ~f:(fun s -> Option.value_exn (Cidr.parse s))
 
 let internal_url_prefixes =
   [ "chrome://"; "chrome-extension://"; "about:"; "edge://"; "brave://";
@@ -66,6 +66,7 @@ type defaults = {
 }
 [@@deriving yojson]
 
+type tenants = (string * tenant_config) list
 let tenants_to_yojson lst =
   `Assoc (List.map lst ~f:(fun (k, v) -> (k, tenant_config_to_yojson v)))
 
@@ -82,8 +83,7 @@ let default_listen = [ "127.0.0.1:7120"; "[::1]:7120" ]
 type config = {
   listen : string list;
   allowed_networks : Cidr.t list;
-  tenants : (string * tenant_config) list;
-      [@to_yojson tenants_to_yojson] [@of_yojson tenants_of_yojson]
+  tenants : tenants;
   rules : rule list;
   defaults : defaults;
 }
@@ -131,8 +131,8 @@ let ( let* ) r f = Result.bind r ~f
 
 let parse_json_string (s : string) : (Yojson.Safe.t, string) Result.t =
   match Yojson.Safe.from_string s with
-  | json -> Ok json
-  | exception Yojson.Json_error msg -> Error (Printf.sprintf "invalid JSON: %s" msg)
+  | json -> Result.return json
+  | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
 (* -- JSON wire types *)
 
@@ -223,40 +223,31 @@ let response_to_wire : type a. a command -> (a, string) Result.t -> Wire.respons
      | Delete_rule _ -> Ok_unit
      | Status -> Ok_status value)
 
+let name_of_resp = function
+  | Wire.Ok_unit -> "Ok_unit"
+  | Wire.Ok_registered _ -> "Ok_registered"
+  | Wire.Ok_route _ -> "Ok_route"
+  | Wire.Ok_test _ -> "Ok_test"
+  | Wire.Ok_config _ -> "Ok_config"
+  | Wire.Ok_status _ -> "Ok_status"
+  | Wire.Err _ -> "Err"
+
 let response_of_wire : type a. a command -> Wire.response -> (a, string) Result.t =
- fun cmd resp ->
-  match resp with
-  | Err { message } -> Error message
-  | Ok_registered { tenant_id } ->
-    (match cmd with
-     | Register _ -> Ok tenant_id
-     | _ -> Error "unexpected Ok_registered")
-  | Ok_route r ->
-    begin match cmd with
-    | Open _ -> Ok r
-    | Open_on _ -> Ok r
-    | _ -> Error "unexpected Ok_route"
-    end
-  | Ok_test t ->
-    (match cmd with
-     | Test _ -> Ok t
-     | _ -> Error "unexpected Ok_test")
-  | Ok_config c ->
-    (match cmd with
-     | Get_config -> Ok c
-     | _ -> Error "unexpected Ok_config")
-  | Ok_status s ->
-    (match cmd with
-     | Status -> Ok s
-     | _ -> Error "unexpected Ok_status")
-  | Ok_unit ->
-    begin match cmd with
-    | Set_config _ -> Ok ()
-    | Add_rule _ -> Ok ()
-    | Update_rule _ -> Ok ()
-    | Delete_rule _ -> Ok ()
-    | _ -> Error "unexpected Ok_unit"
-    end
+  fun cmd resp ->
+  let open Result in
+  match resp, cmd with
+  | Err { message }, _ -> fail message
+  | Ok_registered { tenant_id }, Register _ -> return tenant_id
+  | Ok_route r, Open _ -> return r
+  | Ok_route r, Open_on _ -> return r
+  | Ok_test t, Test _  -> return t
+  | Ok_config c, Get_config -> return c
+  | Ok_status s, Status -> return s
+  | Ok_unit, Set_config _ -> return ()
+  | Ok_unit, Add_rule _ -> return ()
+  | Ok_unit, Update_rule _ -> return ()
+  | Ok_unit, Delete_rule _ -> return ()
+  | resp, _ -> failf "unexpected %s" (name_of_resp resp)
 
 (* -- JSON serialization helpers *)
 
@@ -266,9 +257,9 @@ let serialize_command_json : type a. a command -> Yojson.Safe.t =
 let deserialize_command_json (json : Yojson.Safe.t) :
     (packed_command, string) Result.t =
   let* wire = Wire.command_of_yojson json in
-  Ok (command_of_wire wire)
+  Result.return (command_of_wire wire)
 
-let wire_command_name : Wire.command -> string = function
+let name_of_command : Wire.command -> string = function
   | Register _ -> "Register"
   | Open _ -> "Open"
   | Open_on _ -> "Open_on"

@@ -104,7 +104,7 @@ let send_request (state : state) (cmd : Protocol.Wire.command)
   | Some p ->
     let id = state.next_id in
     let req : Protocol.Wire.request = { id; command = cmd; tenant = None } in
-    log (Printf.sprintf "→ %s id=%d" (Protocol.wire_command_name cmd) id);
+    log (Printf.sprintf "-> %s id=%d" (Protocol.name_of_command cmd) id);
     Chrome_api.Port.post_message_json p (json_to_string (Protocol.Wire.request_to_yojson req));
     { state with
       next_id = id + 1;

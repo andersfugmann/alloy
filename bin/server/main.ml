@@ -479,7 +479,7 @@ let handle_register inbox ~tenant ~brand ~register_id flow reader =
               | Error msg ->
                 log "req[%s]: parse error: %s" tenant msg
               | Ok req ->
-                log "req[%s]: id=%d %s" tenant req.id (Protocol.wire_command_name req.command);
+                log "req[%s]: id=%d %s" tenant req.id (Protocol.name_of_command req.command);
                 let (promise, reply) = Eio.Promise.create () in
                 Eio.Stream.add inbox (Dispatch { id = req.id; command = Protocol.command_of_wire req.command; tenant; reply });
                 let response_line = Eio.Promise.await promise in

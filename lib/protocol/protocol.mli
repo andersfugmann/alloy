@@ -151,7 +151,7 @@ val deserialize_command_json : Yojson.Safe.t -> (packed_command, string) Result.
 
 (** {1 Logging helpers} *)
 
-val wire_command_name : Wire.command -> string
+val name_of_command : Wire.command -> string
 
 (** {1 JSON serialization — server messages} *)
 
