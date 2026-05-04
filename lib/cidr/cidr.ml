@@ -25,3 +25,15 @@ let ip_allowed ~allowed_networks ip_str =
   match Ipaddr.of_string ip_str with
   | Error _ -> false
   | Ok ip -> List.exists allowed_networks ~f:(fun prefix -> Ipaddr.Prefix.mem ip prefix)
+
+let%test "round-trip IPv4 CIDR" =
+  let t = Option.value_exn (parse "192.168.1.0/24") in
+  to_yojson t |> of_yojson |> Result.ok |> Option.value_exn |> Ipaddr.Prefix.compare t |> Int.equal 0
+
+let%test "round-trip IPv6 CIDR" =
+  let t = Option.value_exn (parse "fd00::/8") in
+  to_yojson t |> of_yojson |> Result.ok |> Option.value_exn |> Ipaddr.Prefix.compare t |> Int.equal 0
+
+let%test "round-trip bare IPv4" =
+  let t = Option.value_exn (parse "127.0.0.1") in
+  to_yojson t |> of_yojson |> Result.ok |> Option.value_exn |> Ipaddr.Prefix.compare t |> Int.equal 0

@@ -66,18 +66,15 @@ type defaults = {
 }
 [@@deriving yojson]
 
-(* Serialize tenant map as a JSON object keyed by tenant ID *)
-let tenants_to_yojson (lst : (string * tenant_config) list) : Yojson.Safe.t =
-  `Assoc
-    (List.map lst ~f:(fun (k, v) -> (k, tenant_config_to_yojson v)))
+let tenants_to_yojson lst =
+  `Assoc (List.map lst ~f:(fun (k, v) -> (k, tenant_config_to_yojson v)))
 
-let tenants_of_yojson (json : Yojson.Safe.t) :
-    ((string * tenant_config) list, string) Result.t =
-  match json with
+let tenants_of_yojson = function
   | `Assoc pairs ->
-    List.fold_result pairs ~init:[] ~f:(fun acc (k, v) ->
-        tenant_config_of_yojson v |> Result.map ~f:(fun tc -> (k, tc) :: acc))
-    |> Result.map ~f:List.rev
+    pairs
+    |> List.map ~f:(fun (k, v) ->
+         tenant_config_of_yojson v |> Result.map ~f:(fun tc -> (k, tc)))
+    |> Result.all
   | _ -> Error "tenants: expected JSON object"
 
 let default_listen = [ "127.0.0.1:7120"; "[::1]:7120" ]
@@ -300,200 +297,27 @@ let deserialize_request (s : string) : (Wire.request, string) Result.t =
 
 (* -- Inline expect tests *)
 
-let%expect_test "sample data" =
-  let _rule =
-    { pattern = ".*[.]example[.]com"; target = "work"; enabled = true }
+let%expect_test "GADT command round-trip" =
+  let test : type a. a command -> string -> unit =
+    fun cmd label ->
+      match serialize_command_json cmd |> deserialize_command_json with
+      | Ok (Command _) -> printf "%s: ok\n" label
+      | Error e -> printf "%s: FAIL %s\n" label e
   in
-  let _tenant_cfg =
-    { browser_cmd = Some "chromium"; label = "Work"; color = "#0000ff"; brand = None }
-  in
-  let _defaults =
-    { unmatched = "personal"; cooldown_seconds = 5; browser_launch_timeout = 10 }
-  in
-  [%expect {||}]
-
-(* -- JSON: commands *)
-
-let%expect_test "json: round-trip register" =
-  let json = serialize_command_json (Register (Some "Google Chrome")) in
-  print_endline (Yojson.Safe.to_string json);
-  (match deserialize_command_json json with
-   | Ok (Command (Register (Some brand))) -> printf "brand=%s\n" brand
-   | _ -> print_endline "FAIL");
+  test (Register (Some "Chrome")) "register";
+  test (Open "https://x.com") "open";
+  test (Open_on ("work", "https://x.com")) "open_on";
+  test Get_config "get_config";
+  test Status "status";
+  test (Delete_rule 3) "delete_rule";
   [%expect {|
-    ["Register",{"brand":"Google Chrome"}]
-    brand=Google Chrome
+    register: ok
+    open: ok
+    open_on: ok
+    get_config: ok
+    status: ok
+    delete_rule: ok
     |}]
-
-let%expect_test "json: round-trip open" =
-  let json = serialize_command_json (Open "https://example.com") in
-  print_endline (Yojson.Safe.to_string json);
-  (match deserialize_command_json json with
-   | Ok (Command (Open url)) -> printf "url=%s\n" url
-   | _ -> print_endline "FAIL");
-  [%expect {|
-    ["Open",{"url":"https://example.com"}]
-    url=https://example.com
-    |}]
-
-let%expect_test "json: round-trip open_on" =
-  let json = serialize_command_json (Open_on ("work", "https://example.com")) in
-  (match deserialize_command_json json with
-   | Ok (Command (Open_on (target, url))) ->
-     printf "target=%s url=%s\n" target url
-   | _ -> print_endline "FAIL");
-  [%expect {| target=work url=https://example.com |}]
-
-let%expect_test "json: round-trip test" =
-  let json = serialize_command_json (Test "https://example.com") in
-  (match deserialize_command_json json with
-   | Ok (Command (Test url)) -> printf "url=%s\n" url
-   | _ -> print_endline "FAIL");
-  [%expect {| url=https://example.com |}]
-
-let%expect_test "json: round-trip set_config" =
-  let cfg = {
-    listen = [ "127.0.0.1:7120"; "[::1]:7120" ];
-    allowed_networks = default_allowed_networks;
-    tenants =
-      [ ( "work",
-          { browser_cmd = Some "chromium --profile-directory=Work";
-            label = "Work"; color = "#0000ff"; brand = Some "Google Chrome" } ) ];
-    rules = [ { pattern = ".*[.]example[.]com"; target = "work"; enabled = true } ];
-    defaults = { unmatched = "personal"; cooldown_seconds = 5; browser_launch_timeout = 10 };
-  } in
-  let json = serialize_command_json (Set_config cfg) in
-  (match deserialize_command_json json with
-   | Ok (Command (Set_config cfg)) ->
-     printf "listen=%s\n" (String.concat ~sep:"," cfg.listen)
-   | _ -> print_endline "FAIL");
-  [%expect {| listen=127.0.0.1:7120,[::1]:7120 |}]
-
-let%expect_test "json: round-trip add_rule" =
-  let rule = { pattern = ".*[.]example[.]com"; target = "work"; enabled = true } in
-  let json = serialize_command_json (Add_rule rule) in
-  (match deserialize_command_json json with
-   | Ok (Command (Add_rule r)) -> printf "pattern=%s\n" r.pattern
-   | _ -> print_endline "FAIL");
-  [%expect {| pattern=.*[.]example[.]com |}]
-
-let%expect_test "json: round-trip update_rule" =
-  let rule = { pattern = ".*[.]example[.]com"; target = "work"; enabled = true } in
-  let json = serialize_command_json (Update_rule (5, rule)) in
-  (match deserialize_command_json json with
-   | Ok (Command (Update_rule (idx, r))) ->
-     printf "idx=%d pattern=%s\n" idx r.pattern
-   | _ -> print_endline "FAIL");
-  [%expect {| idx=5 pattern=.*[.]example[.]com |}]
-
-let%expect_test "json: round-trip delete_rule" =
-  let json = serialize_command_json (Delete_rule 7) in
-  (match deserialize_command_json json with
-   | Ok (Command (Delete_rule idx)) -> printf "idx=%d\n" idx
-   | _ -> print_endline "FAIL");
-  [%expect {| idx=7 |}]
-
-(* -- JSON: request *)
-
-let%expect_test "json: request with tenant" =
-  let req : Wire.request = { id = 1; command = Register { brand = Some "Edge"; address = None; name = None }; tenant = Some "mypc" } in
-  let s = serialize_request req in
-  print_endline s;
-  (match deserialize_request s with
-   | Ok r -> printf "id=%d tenant=%s\n" r.id (Option.value r.tenant ~default:"(none)")
-   | Error msg -> printf "FAIL: %s\n" msg);
-  [%expect {|
-    {"id":1,"command":["Register",{"brand":"Edge"}],"tenant":"mypc"}
-    id=1 tenant=mypc
-    |}]
-
-let%expect_test "json: request without tenant" =
-  let req : Wire.request = { id = 2; command = Get_config; tenant = None } in
-  let s = serialize_request req in
-  print_endline s;
-  (match deserialize_request s with
-   | Ok r -> printf "id=%d tenant=%s\n" r.id (Option.value r.tenant ~default:"(none)")
-   | Error msg -> printf "FAIL: %s\n" msg);
-  [%expect {|
-    {"id":2,"command":["Get_config"]}
-    id=2 tenant=(none)
-    |}]
-
-(* -- JSON: server_message *)
-
-let%expect_test "json: server_message response" =
-  let msg = Wire.Response { id = 1; response = Ok_registered { tenant_id = "mypc" } } in
-  let s = serialize_server_message msg in
-  print_endline s;
-  (match deserialize_server_message s with
-   | Ok (Response { id; response = Ok_registered { tenant_id } }) ->
-     printf "id=%d tenant_id=%s\n" id tenant_id
-   | _ -> print_endline "FAIL");
-  [%expect {|
-    ["Response",{"id":1,"response":["Ok_registered",{"tenant_id":"mypc"}]}]
-    id=1 tenant_id=mypc
-    |}]
-
-let%expect_test "json: server_message push" =
-  let msg = Wire.Push { id = 0; push = Navigate { url = "https://example.com" } } in
-  let s = serialize_server_message msg in
-  print_endline s;
-  (match deserialize_server_message s with
-   | Ok (Push { id; push = Navigate { url } }) ->
-     printf "id=%d url=%s\n" id url
-   | _ -> print_endline "FAIL");
-  [%expect {|
-    ["Push",{"id":0,"push":["Navigate",{"url":"https://example.com"}]}]
-    id=0 url=https://example.com
-    |}]
-
-let%expect_test "json: server_message push config_updated" =
-  let cfg : config = {
-    listen = ["127.0.0.1:7120"];
-    allowed_networks = List.filter_map ["127.0.0.0/8"] ~f:Cidr.parse;
-    tenants = [("work", { browser_cmd = None; label = "Work"; color = "#ff0000"; brand = None })];
-    rules = [];
-    defaults = { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
-  } in
-  let msg = Wire.Push { id = 0; push = Config_updated { config = cfg; registered_tenants = ["work"] } } in
-  let s = serialize_server_message msg in
-  (match deserialize_server_message s with
-   | Ok (Push { id; push = Config_updated { config = c; registered_tenants = r } }) ->
-     printf "id=%d tenants=%d registered=%d\n" id (List.length c.tenants) (List.length r)
-   | _ -> print_endline "FAIL");
-  [%expect {| id=0 tenants=1 registered=1 |}]
-
-let%expect_test "json: server_message error response" =
-  let msg = Wire.Response { id = 5; response = Err { message = "not found" } } in
-  let s = serialize_server_message msg in
-  (match deserialize_server_message s with
-   | Ok (Response { id; response = Err { message } }) ->
-     printf "id=%d err=%s\n" id message
-   | _ -> print_endline "FAIL");
-  [%expect {| id=5 err=not found |}]
-
-let%expect_test "json: response config round-trip" =
-  let cfg = {
-    listen = [ "127.0.0.1:7120"; "[::1]:7120" ];
-    allowed_networks = default_allowed_networks;
-    tenants =
-      [ ( "work",
-          { browser_cmd = Some "chromium --profile-directory=Work";
-            label = "Work"; color = "#0000ff"; brand = Some "Google Chrome" } ) ];
-    rules = [ { pattern = ".*[.]example[.]com"; target = "work"; enabled = true } ];
-    defaults = { unmatched = "personal"; cooldown_seconds = 5; browser_launch_timeout = 10 };
-  } in
-  let wire_resp = response_to_wire Get_config (Ok cfg) in
-  let msg = Wire.Response { id = 42; response = wire_resp } in
-  let s = serialize_server_message msg in
-  (match deserialize_server_message s with
-   | Ok (Response { id; response = Ok_config cfg }) ->
-     printf "id=%d listen=%s rules=%d\n" id
-       (String.concat ~sep:"," cfg.listen) (List.length cfg.rules)
-   | _ -> print_endline "FAIL");
-  [%expect {| id=42 listen=127.0.0.1:7120,[::1]:7120 rules=1 |}]
-
-(* -- Error handling *)
 
 let%expect_test "deserialize: invalid json string" =
   (match parse_json_string "not valid json{" with

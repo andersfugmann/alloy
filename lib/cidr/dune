@@ -1,3 +1,6 @@
 (library
  (name cidr)
- (libraries base stdio ipaddr))
+ (inline_tests)
+ (libraries base stdio ipaddr)
+ (preprocess
+  (pps ppx_expect ppx_inline_test)))
