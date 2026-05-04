@@ -448,6 +448,30 @@ let rec coordinator_loop state inbox ~sw ~clock =
 
 (* -- Registration (long-lived connection) *)
 
+let forward_pushes push_stream flow =
+  let rec loop () =
+    let msg = Eio.Stream.take push_stream in
+    Eio.Flow.copy_string (msg ^ "\n") flow;
+    loop ()
+  in
+  loop ()
+
+let receive_requests tenant inbox push_stream reader =
+  let rec loop () =
+    let line = Eio.Buf_read.line reader in
+    (match Protocol.deserialize_request line with
+     | Error msg ->
+       log "req[%s]: parse error: %s" tenant msg
+     | Ok req ->
+       log "req[%s]: id=%d %s" tenant req.id (Protocol.name_of_command req.command);
+       let (promise, reply) = Eio.Promise.create () in
+       Eio.Stream.add inbox (Dispatch { id = req.id; command = Protocol.command_of_wire req.command; tenant; reply });
+       let response_line = Eio.Promise.await promise in
+       Eio.Stream.add push_stream response_line);
+    loop ()
+  in
+  loop ()
+
 let handle_register inbox ~tenant ~brand ~register_id flow reader =
   let push_stream = Eio.Stream.create 16 in
   let (promise, reply) = Eio.Promise.create () in
@@ -461,28 +485,8 @@ let handle_register inbox ~tenant ~brand ~register_id flow reader =
        let ok_msg = Protocol.Wire.Response { id = register_id; response = Ok_registered { tenant_id } } in
        Eio.Flow.copy_string (Protocol.serialize_server_message ok_msg ^ "\n") flow;
        Eio.Fiber.both
-         (fun () ->
-           let rec write_loop () =
-             let msg = Eio.Stream.take push_stream in
-             Eio.Flow.copy_string (msg ^ "\n") flow;
-             write_loop ()
-           in
-           write_loop ())
-         (fun () ->
-           let rec read_loop () =
-             let line = Eio.Buf_read.line reader in
-             (match Protocol.deserialize_request line with
-              | Error msg ->
-                log "req[%s]: parse error: %s" tenant msg
-              | Ok req ->
-                log "req[%s]: id=%d %s" tenant req.id (Protocol.name_of_command req.command);
-                let (promise, reply) = Eio.Promise.create () in
-                Eio.Stream.add inbox (Dispatch { id = req.id; command = Protocol.command_of_wire req.command; tenant; reply });
-                let response_line = Eio.Promise.await promise in
-                Eio.Stream.add push_stream response_line);
-             read_loop ()
-           in
-           read_loop ())
+         (fun () -> forward_pushes push_stream flow)
+         (fun () -> receive_requests tenant inbox push_stream reader)
      with
      | () -> ()
      | exception _ -> ());
@@ -561,19 +565,16 @@ let start_listeners ~sw net listen_addrs =
   | [] -> failwith "no listeners could be started"
   | _ -> listeners
 
-let accept_loop ~sw ~allowed_networks inbox listener =
-  let rec loop () =
-    Eio.Net.accept_fork ~sw listener
-      ~on_error:(fun exn -> log "connection error: %s" (Exn.to_string exn))
-      (fun flow addr ->
-        match check_connection_allowed ~allowed_networks addr with
-        | true -> handle_connection inbox flow
-        | false ->
-          log "rejected connection from disallowed address";
-          Eio.Flow.close flow);
-    loop ()
-  in
-  loop ()
+let rec accept_loop ~sw ~allowed_networks inbox listener =
+  Eio.Net.accept_fork ~sw listener
+    ~on_error:(fun exn -> log "connection error: %s" (Exn.to_string exn))
+    (fun flow addr ->
+       match check_connection_allowed ~allowed_networks addr with
+       | true -> handle_connection inbox flow
+       | false ->
+         log "rejected connection from disallowed address";
+         Eio.Flow.close flow);
+  accept_loop ~sw ~allowed_networks inbox listener
 
 let run config_path =
   Stdlib.Sys.set_signal Stdlib.Sys.sigchld Stdlib.Sys.Signal_ignore;
