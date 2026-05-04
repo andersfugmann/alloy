@@ -448,29 +448,24 @@ let rec coordinator_loop state inbox ~sw ~clock =
 
 (* -- Registration (long-lived connection) *)
 
-let forward_pushes push_stream flow =
-  let rec loop () =
-    let msg = Eio.Stream.take push_stream in
-    Eio.Flow.copy_string (msg ^ "\n") flow;
-    loop ()
-  in
-  loop ()
+let rec forward_pushes push_stream flow =
+  let msg = Eio.Stream.take push_stream in
+  Eio.Flow.copy_string (msg ^ "\n") flow;
+  forward_pushes push_stream flow
 
-let receive_requests tenant inbox push_stream reader =
-  let rec loop () =
-    let line = Eio.Buf_read.line reader in
-    (match Protocol.deserialize_request line with
-     | Error msg ->
-       log "req[%s]: parse error: %s" tenant msg
-     | Ok req ->
-       log "req[%s]: id=%d %s" tenant req.id (Protocol.name_of_command req.command);
-       let (promise, reply) = Eio.Promise.create () in
-       Eio.Stream.add inbox (Dispatch { id = req.id; command = Protocol.command_of_wire req.command; tenant; reply });
-       let response_line = Eio.Promise.await promise in
-       Eio.Stream.add push_stream response_line);
-    loop ()
+let rec receive_requests tenant inbox push_stream reader =
+  let line = Eio.Buf_read.line reader in
+  let () = match Protocol.deserialize_request line with
+    | Error msg ->
+      log "req[%s]: parse error: %s" tenant msg
+    | Ok req ->
+      log "req[%s]: id=%d %s" tenant req.id (Protocol.name_of_command req.command);
+      let (promise, reply) = Eio.Promise.create () in
+      Eio.Stream.add inbox (Dispatch { id = req.id; command = Protocol.command_of_wire req.command; tenant; reply });
+      let response_line = Eio.Promise.await promise in
+      Eio.Stream.add push_stream response_line
   in
-  loop ()
+  receive_requests tenant inbox push_stream reader
 
 let handle_register inbox ~tenant ~brand ~register_id flow reader =
   let push_stream = Eio.Stream.create 16 in
@@ -481,15 +476,16 @@ let handle_register inbox ~tenant ~brand ~register_id flow reader =
     let err_msg = Protocol.Wire.Response { id = register_id; response = Err { message = msg } } in
     Eio.Flow.copy_string (Protocol.serialize_server_message err_msg ^ "\n") flow
   | Ok tenant_id ->
-    (match
-       let ok_msg = Protocol.Wire.Response { id = register_id; response = Ok_registered { tenant_id } } in
-       Eio.Flow.copy_string (Protocol.serialize_server_message ok_msg ^ "\n") flow;
-       Eio.Fiber.both
-         (fun () -> forward_pushes push_stream flow)
-         (fun () -> receive_requests tenant inbox push_stream reader)
-     with
-     | () -> ()
-     | exception _ -> ());
+    begin
+      try
+        let ok_msg = Protocol.Wire.Response { id = register_id; response = Ok_registered { tenant_id } } in
+        Eio.Flow.copy_string (Protocol.serialize_server_message ok_msg ^ "\n") flow;
+        Eio.Fiber.both
+          (fun () -> forward_pushes push_stream flow)
+          (fun () -> receive_requests tenant inbox push_stream reader)
+      with
+      | _ -> ()
+    end;
     Eio.Stream.add inbox (Unregister_tenant { tenant })
 
 (* -- Connection handling *)
@@ -506,18 +502,18 @@ let handle_connection inbox flow =
        let resp = Protocol.serialize_server_message err_msg in
        log "res: %s" resp;
        Eio.Flow.copy_string (resp ^ "\n") flow
-     | Ok req ->
-       let tenant = Option.value req.tenant ~default:"default" in
-       (match Protocol.command_of_wire req.command with
+     | Ok { id; tenant; command; } ->
+       let tenant = Option.value tenant ~default:"default" in
+       match Protocol.command_of_wire command with
         | Command (Register brand) ->
           log "res[%s]: registering (brand=%s)" tenant
             (Option.value brand ~default:"(none)");
-          handle_register inbox ~tenant ~brand ~register_id:req.id flow reader
+          handle_register inbox ~tenant ~brand ~register_id:id flow reader
         | packed_cmd ->
           let (promise, reply) = Eio.Promise.create () in
-          Eio.Stream.add inbox (Dispatch { id = req.id; command = packed_cmd; tenant; reply });
+          Eio.Stream.add inbox (Dispatch { id; command = packed_cmd; tenant; reply });
           let response_line = Eio.Promise.await promise in
-          Eio.Flow.copy_string (response_line ^ "\n") flow)
+          Eio.Flow.copy_string (response_line ^ "\n") flow
 
 (* -- Main *)
 
