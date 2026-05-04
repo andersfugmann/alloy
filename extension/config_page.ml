@@ -12,8 +12,8 @@ let rec swap_nth n = function
 let config : Protocol.config ref =
   ref
     Protocol.{
-      listen = default_listen;
-      allowed_networks = default_allowed_networks;
+      listen = Constants.default_listen;
+      allowed_networks = Constants.default_allowed_networks;
       tenants = [];
       rules = [];
       defaults =

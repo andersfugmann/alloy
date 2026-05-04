@@ -2,4 +2,4 @@
  (name main)
  (public_name alloy)
  (package alloy)
- (libraries protocol eio eio_main yojson base stdio unix cmdliner))
+ (libraries protocol constants eio eio_main yojson base stdio unix cmdliner))

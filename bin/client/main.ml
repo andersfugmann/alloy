@@ -334,8 +334,8 @@ let run_bridge env =
   match await_register () with
   | None -> ()
   | Some (_tenant, addr_override, register_line) ->
-  let default_addr = Printf.sprintf "127.0.0.1:%d" Protocol.default_port in
-  let addr = Protocol.parse_address
+  let default_addr = Printf.sprintf "127.0.0.1:%d" Constants.default_port in
+  let addr = Protocol.parse_address ~default_port:Constants.default_port
     (Option.value addr_override ~default:default_addr) in
   (* stdout writer: single writer ensures no interleaving *)
   let write_stdout () =
@@ -394,9 +394,9 @@ let run_bridge env =
 let run_cli { mode; address; name } =
   Eio_main.run @@ fun env ->
   let net = Eio.Stdenv.net env in
-  let default_addr = Printf.sprintf "127.0.0.1:%d" Protocol.default_port in
+  let default_addr = Printf.sprintf "127.0.0.1:%d" Constants.default_port in
   let resolve_addr () =
-    Protocol.parse_address
+    Protocol.parse_address ~default_port:Constants.default_port
       (Option.value address ~default:default_addr)
   in
   let resolve_tenant default = Option.value name ~default in

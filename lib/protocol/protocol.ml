@@ -1,15 +1,11 @@
 open !Base
 open !Stdio
 
-(* -- Constants *)
-
-let default_port = 7120
-
 (* -- Address parsing *)
 
 type address = { host : string; port : int }
 
-let parse_address (s : string) : address =
+let parse_address ~default_port (s : string) : address =
   let s = String.strip s in
   (* Handle IPv6 [host]:port *)
   match String.lsplit2 s ~on:']' with
@@ -28,9 +24,6 @@ let parse_address (s : string) : address =
       { host; port }
     | None -> { host = s; port = default_port }
     end
-
-let default_allowed_networks =
-  List.map [ "127.0.0.0/8"; "::1/128" ] ~f:(fun s -> Option.value_exn (Cidr.parse s))
 
 let internal_url_prefixes =
   [ "chrome://"; "chrome-extension://"; "about:"; "edge://"; "brave://";
@@ -77,8 +70,6 @@ let tenants_of_yojson = function
          tenant_config_of_yojson v |> Result.map ~f:(fun tc -> (k, tc)))
     |> Result.all
   | _ -> Error "tenants: expected JSON object"
-
-let default_listen = [ "127.0.0.1:7120"; "[::1]:7120" ]
 
 type config = {
   listen : string list;

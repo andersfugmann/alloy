@@ -128,7 +128,7 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
   let name = non_empty tenant_name in
   let address =
     let h = Option.value (non_empty daemon_host) ~default:"127.0.0.1" in
-    let p = Option.value (non_empty daemon_port) ~default:(Int.to_string Protocol.default_port) in
+    let p = Option.value (non_empty daemon_port) ~default:(Int.to_string Constants.default_port) in
     Some (Printf.sprintf "%s:%s" h p)
   in
   log (Printf.sprintf "Browser brand: %s, tenant: %s, address: %s"

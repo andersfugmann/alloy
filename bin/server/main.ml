@@ -51,9 +51,9 @@ type coordinator_msg =
 
 let default_config () : Protocol.config =
   {
-    listen = Protocol.default_listen;
+    listen = Constants.default_listen;
 
-    allowed_networks = Protocol.default_allowed_networks;
+    allowed_networks = Constants.default_allowed_networks;
     tenants = [];
     rules = [];
     defaults =
@@ -586,7 +586,7 @@ let run config_path =
   in
   let listeners =
     List.filter_map config.listen ~f:(fun addr_str ->
-      let { Protocol.host; port } = Protocol.parse_address addr_str in
+      let { Protocol.host; port } = Protocol.parse_address ~default_port:Constants.default_port addr_str in
       match
         let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
         let listener = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net (`Tcp (ip, port)) in

@@ -2,4 +2,4 @@
  (name main)
  (public_name alloyd)
  (package alloy)
- (libraries protocol log cidr eio eio_main yojson base stdio re unix cmdliner))
+ (libraries protocol log cidr constants eio eio_main yojson base stdio re unix cmdliner))

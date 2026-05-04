@@ -1,18 +1,10 @@
 (** Multi-tenant URL routing protocol types and serialization. *)
 
-(** {1 Constants} *)
-
-val default_port : int
-
 (** {1 Address parsing} *)
 
 type address = { host : string; port : int }
 
-val parse_address : string -> address
-
-(** {1 Network defaults} *)
-
-val default_allowed_networks : Cidr.t list
+val parse_address : default_port:int -> string -> address
 
 val is_internal_url : string -> bool
 
@@ -42,8 +34,6 @@ type defaults = {
   browser_launch_timeout : int;
 }
 [@@deriving yojson]
-
-val default_listen : string list
 
 type config = {
   listen : string list;

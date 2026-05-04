@@ -9,7 +9,7 @@
  (name main)
  (modules main)
  (modes js)
- (libraries chrome_api protocol js_of_ocaml js_of_ocaml-lwt lwt base stdio yojson)
+ (libraries chrome_api protocol constants js_of_ocaml js_of_ocaml-lwt lwt base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))
@@ -20,7 +20,7 @@
  (names popup config_page options_page add_rule_page)
  (modules popup config_page options_page add_rule_page page_util)
  (modes js)
- (libraries chrome_api protocol js_of_ocaml base stdio yojson)
+ (libraries chrome_api protocol constants js_of_ocaml base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))
