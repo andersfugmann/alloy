@@ -1,7 +1,6 @@
 open! Base
 open! Stdio
 
+let (^^) = Stdlib.(^^)
 let log fmt =
-  Printf.ksprintf
-    (fun msg -> printf "[Alloy] %s\n%!" msg)
-    fmt
+  printf ("[Alloy] " ^^ fmt ^^ "\n%!")

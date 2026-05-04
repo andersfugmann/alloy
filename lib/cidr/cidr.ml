@@ -21,10 +21,7 @@ let parse s =
   | Ok v -> Some v
   | Error _ -> None
 
-let mem prefix ip =
-  Ipaddr.Prefix.mem ip prefix
-
 let ip_allowed ~allowed_networks ip_str =
   match Ipaddr.of_string ip_str with
   | Error _ -> false
-  | Ok ip -> List.exists allowed_networks ~f:(fun prefix -> mem prefix ip)
+  | Ok ip -> List.exists allowed_networks ~f:(fun prefix -> Ipaddr.Prefix.mem ip prefix)

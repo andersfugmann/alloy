@@ -83,8 +83,8 @@ let tenants_of_yojson (json : Yojson.Safe.t) :
 let default_listen = [ "127.0.0.1:7120"; "[::1]:7120" ]
 
 type config = {
-  listen : string list; [@default default_listen]
-  allowed_networks : Cidr.t list; [@default default_allowed_networks]
+  listen : string list;
+  allowed_networks : Cidr.t list;
   tenants : (string * tenant_config) list;
       [@to_yojson tenants_to_yojson] [@of_yojson tenants_of_yojson]
   rules : rule list;
