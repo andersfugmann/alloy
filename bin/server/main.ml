@@ -153,44 +153,38 @@ let deliver_url state target url ~sw ~clock ~inbox =
     Eio.Stream.add stream (Protocol.serialize_server_message push_msg);
     (state, Eio.Promise.create_resolved (Ok (Protocol.Remote target)))
   | None ->
+    let existing_sentinel = List.Assoc.find state.starting ~equal:String.equal target in
     let sentinel =
-      match List.Assoc.find state.starting ~equal:String.equal target with
-      | Some sentinel -> Some sentinel
+      match existing_sentinel with
+      | Some _ -> existing_sentinel
       | None ->
-        let browser_cmd =
-          List.Assoc.find state.config.tenants ~equal:String.equal target
-          |> Option.bind ~f:(fun (tc : Protocol.tenant_config) -> tc.browser_cmd)
-        in
-        match browser_cmd with
-        | None ->
-          log "tenant %s has no browser command" target;
-          None
-        | Some cmd ->
-          let timeout = Float.of_int state.config.defaults.browser_launch_timeout in
-          log "starting tenant %s (timeout %.0fs): %s" target timeout cmd;
-          Eio.Fiber.fork ~sw (fun () ->
-              launch_browser cmd;
-              Eio.Time.sleep clock timeout;
-              Eio.Stream.add inbox (Launch_timeout { tenant = target }));
-          Some { pending = [] }
+        List.Assoc.find state.config.tenants ~equal:String.equal target
+        |> Option.bind ~f:(fun (tc : Protocol.tenant_config) -> tc.browser_cmd)
+        |> Option.map ~f:(fun cmd ->
+             let timeout = Float.of_int state.config.defaults.browser_launch_timeout in
+             log "starting tenant %s (timeout %.0fs): %s" target timeout cmd;
+             Eio.Fiber.fork ~sw (fun () ->
+                 launch_browser cmd;
+                 Eio.Time.sleep clock timeout;
+                 Eio.Stream.add inbox (Launch_timeout { tenant = target }));
+             { pending = [] })
     in
     match sentinel with
+    | None ->
+      let msg = Printf.sprintf "Unknown tenant %s or no browser command given" target in
+      (state, Eio.Promise.create_resolved (Error msg))
     | Some { pending } ->
       let pending, promise =
         match List.find pending ~f:(fun pd -> String.equal pd.url url) with
         | Some { promise; _ } ->
           log "URL already queued for starting tenant %s: %s" target url;
-          pending, promise
+          (pending, promise)
         | None ->
           let (promise, resolver) = Eio.Promise.create () in
-          let pending = { url; reply = resolver; promise } :: pending in
-          pending, promise
+          ({ url; reply = resolver; promise } :: pending, promise)
       in
       let starting = List.Assoc.add state.starting ~equal:String.equal target { pending } in
-      { state with starting }, promise
-    | None ->
-      let msg = Printf.sprintf "Unknown tenant %s or no browser command given" target in
-      state, Eio.Promise.create_resolved (Error msg)
+      ({ state with starting }, promise)
 
 (* -- Command handlers *)
 
@@ -201,16 +195,15 @@ let handle_open state tenant url ~sw ~clock ~inbox =
   let now = Unix.gettimeofday () in
   let (in_cooldown, pruned) = check_and_prune_cooldowns state.cooldowns ~now ~key:url in
   let state = { state with cooldowns = pruned } in
-  let target = match in_cooldown with
+  let target =
+    match in_cooldown || String.equal target tenant with
     | true -> "local"
-    | false when String.equal target tenant -> "local"
     | false -> target
   in
-
-  (* Only update the cooldowns if the target is not self *)
-  let cooldowns = match target with
-    | "local" -> state.cooldowns
-    | _ ->
+  let cooldowns =
+    match String.equal target "local" with
+    | true -> state.cooldowns
+    | false ->
       let cooldown = Float.of_int state.config.defaults.cooldown_seconds in
       { key = url; expires = now +. cooldown } :: state.cooldowns
   in
@@ -374,62 +367,65 @@ let dispatch_command :
 
 (* -- Coordinator loop *)
 
+let flush_pending_deliveries state tenant push_stream =
+  match List.Assoc.find state.starting ~equal:String.equal tenant with
+  | None -> state
+  | Some sentinel ->
+    List.iter sentinel.pending ~f:(fun pd ->
+      let push_msg = Protocol.Wire.Push { id = 0; push = Navigate { url = pd.url } } in
+      Eio.Stream.add push_stream (Protocol.serialize_server_message push_msg);
+      Eio.Promise.resolve pd.reply (Ok (Protocol.Remote tenant));
+      log "delivered pending URL to %s: %s" tenant pd.url);
+    let starting = List.Assoc.remove state.starting ~equal:String.equal tenant in
+    { state with starting }
+
+let update_tenant_config state tenant brand =
+  let suggested_cmd = browser_cmd_of_brand brand in
+  let tenants =
+    match List.Assoc.find state.config.tenants ~equal:String.equal tenant with
+    | Some existing ->
+      let browser_cmd =
+        match existing.browser_cmd with
+        | Some _ -> existing.browser_cmd
+        | None -> suggested_cmd
+      in
+      let updated = { existing with brand; browser_cmd } in
+      List.Assoc.add state.config.tenants ~equal:String.equal tenant updated
+    | None ->
+      let new_tenant : Protocol.tenant_config =
+        { browser_cmd = suggested_cmd; label = tenant; color = "#808080"; brand }
+      in
+      log "auto-added tenant %s to config" tenant;
+      state.config.tenants @ [ (tenant, new_tenant) ]
+  in
+  let config = { state.config with tenants } in
+  let state = { state with config } in
+  let _ = try_save_config state in
+  state
+
 let rec coordinator_loop state inbox ~sw ~clock =
   let state = match Eio.Stream.take inbox with
     | Dispatch { id; command = Protocol.Command cmd; tenant; reply } ->
       dispatch_command state tenant id cmd ~reply ~sw ~clock ~inbox
     | Register_tenant { tenant; brand; push_stream; reply } ->
-      (match Map.mem state.registry tenant with
-       | true ->
-         log "tenant %s re-registering (replacing stale connection)" tenant;
-         let registry = Map.set state.registry ~key:tenant ~data:push_stream in
-         Eio.Promise.resolve reply (Ok tenant);
-         let state = { state with registry } in
-         broadcast_config state;
-         state
-       | false ->
-         let registry = Map.set state.registry ~key:tenant ~data:push_stream in
-         Eio.Promise.resolve reply (Ok tenant);
-         log "tenant %s registered (brand=%s)" tenant
-           (Option.value brand ~default:"(none)");
-         let state = { state with registry } in
-         (* Flush pending deliveries if tenant was starting *)
-         let state =
-           match List.Assoc.find state.starting ~equal:String.equal tenant with
-           | None -> state
-           | Some sentinel ->
-             List.iter sentinel.pending ~f:(fun pd ->
-               let push_msg = Protocol.Wire.Push { id = 0; push = Navigate { url = pd.url } } in
-               Eio.Stream.add push_stream (Protocol.serialize_server_message push_msg);
-               Eio.Promise.resolve pd.reply (Ok (Protocol.Remote tenant));
-               log "delivered pending URL to %s: %s" tenant pd.url);
-             let starting = List.Assoc.remove state.starting ~equal:String.equal tenant in
-             { state with starting }
-         in
-         (* Update or auto-add tenant config with brand *)
-         let suggested_cmd = browser_cmd_of_brand brand in
-         let tenants =
-           match List.Assoc.find state.config.tenants ~equal:String.equal tenant with
-           | Some existing ->
-             let browser_cmd =
-               match existing.browser_cmd with
-               | Some _ -> existing.browser_cmd
-               | None -> suggested_cmd
-             in
-             let updated = { existing with brand; browser_cmd } in
-             List.Assoc.add state.config.tenants ~equal:String.equal tenant updated
-           | None ->
-             let new_tenant : Protocol.tenant_config =
-               { browser_cmd = suggested_cmd; label = tenant; color = "#808080"; brand }
-             in
-             log "auto-added tenant %s to config" tenant;
-             state.config.tenants @ [ (tenant, new_tenant) ]
-         in
-         let config = { state.config with tenants } in
-         let state = { state with config } in
-         let _ = try_save_config state in
-         broadcast_config state;
-         state)
+      let is_reregister = Map.mem state.registry tenant in
+      let registry = Map.set state.registry ~key:tenant ~data:push_stream in
+      Eio.Promise.resolve reply (Ok tenant);
+      let state = { state with registry } in
+      let state =
+        match is_reregister with
+        | true ->
+          log "tenant %s re-registering (replacing stale connection)" tenant;
+          state
+        | false ->
+          log "tenant %s registered (brand=%s)" tenant
+            (Option.value brand ~default:"(none)");
+          state
+          |> fun s -> flush_pending_deliveries s tenant push_stream
+          |> fun s -> update_tenant_config s tenant brand
+      in
+      broadcast_config state;
+      state
     | Unregister_tenant { tenant } ->
       let registry = Map.remove state.registry tenant in
       log "tenant %s unregistered" tenant;
@@ -500,7 +496,7 @@ let handle_connection inbox flow =
   | exception (End_of_file | Eio.Io _) -> ()
   | line ->
     log "req: %s" line;
-    (match Protocol.deserialize_request line with
+    match Protocol.deserialize_request line with
      | Error msg ->
        let err_msg = Protocol.Wire.Response { id = 0; response = Err { message = msg } } in
        let resp = Protocol.serialize_server_message err_msg in
@@ -517,18 +513,14 @@ let handle_connection inbox flow =
           let (promise, reply) = Eio.Promise.create () in
           Eio.Stream.add inbox (Dispatch { id = req.id; command = packed_cmd; tenant; reply });
           let response_line = Eio.Promise.await promise in
-          Eio.Flow.copy_string (response_line ^ "\n") flow))
+          Eio.Flow.copy_string (response_line ^ "\n") flow)
 
 (* -- Main *)
 
 let default_config_path =
   Sys.getenv_exn "HOME" ^ "/.config/alloy/config.json"
 
-let run config_path =
-  Stdlib.Sys.set_signal Stdlib.Sys.sigchld Stdlib.Sys.Signal_ignore;
-  Eio_main.run @@ fun env ->
-  let clock = Eio.Stdenv.clock env in
-  let net = Eio.Stdenv.net env in
+let load_and_validate_config config_path =
   let config =
     match load_config config_path with
     | Ok c -> c
@@ -543,6 +535,60 @@ let run config_path =
       log "fatal: invalid rules in config: %s" msg;
       Stdlib.exit 1
   in
+  (match List.is_empty config.allowed_networks with
+   | true ->
+     log "fatal: no valid allowed_networks configured — all connections would be rejected";
+     Stdlib.exit 1
+   | false -> ());
+  (config, compiled_rules)
+
+let check_connection_allowed ~allowed_networks addr =
+  match addr with
+  | `Tcp (ip, _port) ->
+    let ip_str = Unix.string_of_inet_addr (Eio_unix.Net.Ipaddr.to_unix ip) in
+    Cidr.ip_allowed ~allowed_networks ip_str
+  | _ -> false
+
+let start_listeners ~sw net listen_addrs =
+  let listeners =
+    List.filter_map listen_addrs ~f:(fun ({ host; port } : Protocol.listen_address) ->
+      match
+        let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
+        let listener = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net (`Tcp (ip, port)) in
+        log "listening on %s:%d" host port;
+        listener
+      with
+      | listener -> Some listener
+      | exception exn ->
+        log "warning: failed to listen on %s:%d: %s" host port (Exn.to_string exn);
+        None)
+  in
+  match listeners with
+  | [] ->
+    log "fatal: no listeners could be started";
+    Stdlib.exit 1
+  | _ -> listeners
+
+let accept_loop ~sw ~allowed_networks inbox listener =
+  let rec loop () =
+    Eio.Net.accept_fork ~sw listener
+      ~on_error:(fun exn -> log "connection error: %s" (Exn.to_string exn))
+      (fun flow addr ->
+        match check_connection_allowed ~allowed_networks addr with
+        | true -> handle_connection inbox flow
+        | false ->
+          log "rejected connection from disallowed address";
+          Eio.Flow.close flow);
+    loop ()
+  in
+  loop ()
+
+let run config_path =
+  Stdlib.Sys.set_signal Stdlib.Sys.sigchld Stdlib.Sys.Signal_ignore;
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env in
+  let net = Eio.Stdenv.net env in
+  let (config, compiled_rules) = load_and_validate_config config_path in
   let initial_state =
     {
       config;
@@ -555,56 +601,12 @@ let run config_path =
     }
   in
   let inbox = Eio.Stream.create 64 in
-  (match List.is_empty config.allowed_networks with
-   | true ->
-     log "fatal: no valid allowed_networks configured — all connections would be rejected";
-     Stdlib.exit 1
-   | false -> ());
   Eio.Switch.run @@ fun sw ->
-  let accept_loop listener =
-    let rec loop () =
-      Eio.Net.accept_fork ~sw listener
-        ~on_error:(fun exn ->
-          log "connection error: %s"
-            (Exn.to_string exn))
-        (fun flow addr ->
-          let allowed =
-            match addr with
-            | `Tcp (ip, _port) ->
-              let ip_str = Unix.string_of_inet_addr (Eio_unix.Net.Ipaddr.to_unix ip) in
-              Cidr.ip_allowed ~allowed_networks:config.allowed_networks ip_str
-            | _ -> false
-          in
-          match allowed with
-          | true -> handle_connection inbox flow
-          | false ->
-            log "rejected connection from disallowed address";
-            Eio.Flow.close flow);
-      loop ()
-    in
-    loop ()
-  in
-  let listeners =
-    List.filter_map config.listen ~f:(fun ({ host; port } : Protocol.listen_address) ->
-      match
-        let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
-        let listener = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net (`Tcp (ip, port)) in
-        log "listening on %s:%d" host port;
-        listener
-      with
-      | listener -> Some listener
-      | exception exn ->
-        log "warning: failed to listen on %s:%d: %s" host port (Exn.to_string exn);
-        None)
-  in
-  (match listeners with
-   | [] ->
-     log "fatal: no listeners could be started";
-     Stdlib.exit 1
-   | _ -> ());
+  let listeners = start_listeners ~sw net config.listen in
+  let allowed_networks = config.allowed_networks in
   Eio.Fiber.all
     ((fun () -> coordinator_loop initial_state inbox ~sw ~clock)
-     :: List.map listeners ~f:(fun l -> fun () -> accept_loop l))
+     :: List.map listeners ~f:(fun l -> fun () -> accept_loop ~sw ~allowed_networks inbox l))
 
 let () =
   let open Cmdliner in
