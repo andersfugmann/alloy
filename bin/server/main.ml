@@ -480,7 +480,7 @@ let handle_register inbox ~tenant ~brand ~register_id flow reader =
       try
         let ok_msg = Protocol.Wire.Response { id = register_id; response = Ok_registered { tenant_id } } in
         Eio.Flow.copy_string (Protocol.serialize_server_message ok_msg ^ "\n") flow;
-        Eio.Fiber.both
+        Eio.Fiber.first
           (fun () -> forward_pushes push_stream flow)
           (fun () -> receive_requests tenant inbox push_stream reader)
       with
