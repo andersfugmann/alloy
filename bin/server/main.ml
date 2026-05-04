@@ -524,21 +524,15 @@ let load_and_validate_config config_path =
   let config =
     match load_config config_path with
     | Ok c -> c
-    | Error msg ->
-      log "fatal: %s" msg;
-      Stdlib.exit 1
+    | Error msg -> failwith msg
   in
   let compiled_rules =
     match compile_rules config.rules with
     | Ok cr -> cr
-    | Error msg ->
-      log "fatal: invalid rules in config: %s" msg;
-      Stdlib.exit 1
+    | Error msg -> failwith (Printf.sprintf "invalid rules in config: %s" msg)
   in
   (match List.is_empty config.allowed_networks with
-   | true ->
-     log "fatal: no valid allowed_networks configured — all connections would be rejected";
-     Stdlib.exit 1
+   | true -> failwith "no valid allowed_networks configured — all connections would be rejected"
    | false -> ());
   (config, compiled_rules)
 
@@ -564,9 +558,7 @@ let start_listeners ~sw net listen_addrs =
         None)
   in
   match listeners with
-  | [] ->
-    log "fatal: no listeners could be started";
-    Stdlib.exit 1
+  | [] -> failwith "no listeners could be started"
   | _ -> listeners
 
 let accept_loop ~sw ~allowed_networks inbox listener =
@@ -585,28 +577,32 @@ let accept_loop ~sw ~allowed_networks inbox listener =
 
 let run config_path =
   Stdlib.Sys.set_signal Stdlib.Sys.sigchld Stdlib.Sys.Signal_ignore;
-  Eio_main.run @@ fun env ->
-  let clock = Eio.Stdenv.clock env in
-  let net = Eio.Stdenv.net env in
-  let (config, compiled_rules) = load_and_validate_config config_path in
-  let initial_state =
-    {
-      config;
-      config_path;
-      compiled_rules;
-      registry = Map.empty (module String);
-      starting = [];
-      cooldowns = [];
-      start_time = Unix.gettimeofday ();
-    }
-  in
-  let inbox = Eio.Stream.create 64 in
-  Eio.Switch.run @@ fun sw ->
-  let listeners = start_listeners ~sw net config.listen in
-  let allowed_networks = config.allowed_networks in
-  Eio.Fiber.all
-    ((fun () -> coordinator_loop initial_state inbox ~sw ~clock)
-     :: List.map listeners ~f:(fun l -> fun () -> accept_loop ~sw ~allowed_networks inbox l))
+  try
+    Eio_main.run @@ fun env ->
+    let clock = Eio.Stdenv.clock env in
+    let net = Eio.Stdenv.net env in
+    let (config, compiled_rules) = load_and_validate_config config_path in
+    let initial_state =
+      {
+        config;
+        config_path;
+        compiled_rules;
+        registry = Map.empty (module String);
+        starting = [];
+        cooldowns = [];
+        start_time = Unix.gettimeofday ();
+      }
+    in
+    let inbox = Eio.Stream.create 64 in
+    Eio.Switch.run @@ fun sw ->
+    let listeners = start_listeners ~sw net config.listen in
+    let allowed_networks = config.allowed_networks in
+    Eio.Fiber.all
+      ((fun () -> coordinator_loop initial_state inbox ~sw ~clock)
+       :: List.map listeners ~f:(fun l -> fun () -> accept_loop ~sw ~allowed_networks inbox l))
+  with Failure msg ->
+    log "fatal: %s" msg;
+    Stdlib.exit 1
 
 let () =
   let open Cmdliner in
