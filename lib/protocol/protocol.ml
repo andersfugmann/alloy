@@ -29,7 +29,8 @@ let parse_address (s : string) : address =
     | None -> { host = s; port = default_port }
     end
 
-let default_allowed_networks = [ "127.0.0.0/8"; "::1/128" ]
+let default_allowed_networks =
+  List.filter_map [ "127.0.0.0/8"; "::1/128" ] ~f:Cidr.parse
 
 let internal_url_prefixes =
   [ "chrome://"; "chrome-extension://"; "about:"; "edge://"; "brave://";
@@ -83,7 +84,7 @@ let default_listen = [ "127.0.0.1:7120"; "[::1]:7120" ]
 
 type config = {
   listen : string list; [@default default_listen]
-  allowed_networks : string list; [@default default_allowed_networks]
+  allowed_networks : Cidr.t list; [@default default_allowed_networks]
   tenants : (string * tenant_config) list;
       [@to_yojson tenants_to_yojson] [@of_yojson tenants_of_yojson]
   rules : rule list;
@@ -449,7 +450,7 @@ let%expect_test "json: server_message push" =
 let%expect_test "json: server_message push config_updated" =
   let cfg : config = {
     listen = ["127.0.0.1:7120"];
-    allowed_networks = ["127.0.0.0/8"];
+    allowed_networks = List.filter_map ["127.0.0.0/8"] ~f:Cidr.parse;
     tenants = [("work", { browser_cmd = None; label = "Work"; color = "#ff0000"; brand = None })];
     rules = [];
     defaults = { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };

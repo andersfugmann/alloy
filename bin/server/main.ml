@@ -555,15 +555,7 @@ let run config_path =
     }
   in
   let inbox = Eio.Stream.create 64 in
-  let allowed_networks =
-    List.filter_map config.allowed_networks ~f:(fun cidr_str ->
-      match Cidr.parse cidr_str with
-      | Some cidr -> Some cidr
-      | None ->
-        log "warning: invalid CIDR in allowed_networks: %s" cidr_str;
-        None)
-  in
-  (match List.is_empty allowed_networks with
+  (match List.is_empty config.allowed_networks with
    | true ->
      log "fatal: no valid allowed_networks configured — all connections would be rejected";
      Stdlib.exit 1
@@ -580,7 +572,7 @@ let run config_path =
             match addr with
             | `Tcp (ip, _port) ->
               let ip_str = Unix.string_of_inet_addr (Eio_unix.Net.Ipaddr.to_unix ip) in
-              Cidr.ip_allowed ~allowed_networks ip_str
+              Cidr.ip_allowed ~allowed_networks:config.allowed_networks ip_str
             | _ -> false
           in
           match allowed with

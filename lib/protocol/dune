@@ -1,6 +1,6 @@
 (library
  (name protocol)
- (libraries base stdio yojson)
+ (libraries base stdio yojson cidr)
  (inline_tests)
  (preprocess
   (pps ppx_deriving_yojson ppx_expect ppx_inline_test)))

@@ -12,7 +12,7 @@ val parse_address : string -> address
 
 (** {1 Network defaults} *)
 
-val default_allowed_networks : string list
+val default_allowed_networks : Cidr.t list
 
 val is_internal_url : string -> bool
 
@@ -47,7 +47,7 @@ val default_listen : string list
 
 type config = {
   listen : string list;
-  allowed_networks : string list;
+  allowed_networks : Cidr.t list;
   tenants : (string * tenant_config) list;
   rules : rule list;
   defaults : defaults;
