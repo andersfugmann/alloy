@@ -33,20 +33,23 @@ type state = {
 
 (* -- Coordinator messages *)
 
-type coordinator_msg =
+type coordinator_action =
   | Dispatch of {
       command : Protocol.packed_command;
-      tenant : string;
       reply : Protocol.Wire.response Eio.Promise.u;
     }
-  | Register_tenant of {
-      tenant : string;
+  | Register of {
       brand : string option;
       push_stream : string Eio.Stream.t;
       reply : (string, string) Result.t Eio.Promise.u;
     }
-  | Unregister_tenant of { tenant : string }
-  | Launch_timeout of { tenant : string }
+  | Unregister
+  | Launch_timeout
+
+type coordinator_msg = {
+  tenant : string;
+  action : coordinator_action;
+}
 
 let default_config () : Protocol.config =
   {
@@ -165,7 +168,7 @@ let deliver_url state target url ~sw ~clock ~inbox =
              Eio.Fiber.fork ~sw (fun () ->
                  launch_browser cmd;
                  Eio.Time.sleep clock timeout;
-                 Eio.Stream.add inbox (Launch_timeout { tenant = target }));
+                 Eio.Stream.add inbox { tenant = target; action = Launch_timeout });
              { pending = [] })
     in
     match sentinel with
@@ -304,11 +307,11 @@ let broadcast_config (state : state) : unit =
     Eio.Stream.add stream s)
 
 let dispatch_command :
-    type a. state -> Protocol.tenant_id -> a Protocol.command ->
+    type a. state -> tenant:Protocol.tenant_id -> a Protocol.command ->
     reply:Protocol.Wire.response Eio.Promise.u ->
     sw:Eio.Switch.t -> clock:_ Eio.Time.clock ->
     inbox:coordinator_msg Eio.Stream.t -> state =
- fun state tenant cmd ~reply ~sw ~clock ~inbox ->
+ fun state ~tenant cmd ~reply ~sw ~clock ~inbox ->
   let resolve resp = Eio.Promise.resolve reply (Protocol.response_to_wire cmd resp) in
   match cmd with
   | Protocol.Register _ ->
@@ -397,10 +400,11 @@ let update_tenant_config state tenant brand =
   state
 
 let rec coordinator_loop state inbox ~sw ~clock =
-  let state = match Eio.Stream.take inbox with
-    | Dispatch { command = Protocol.Command cmd; tenant; reply } ->
-      dispatch_command state tenant cmd ~reply ~sw ~clock ~inbox
-    | Register_tenant { tenant; brand; push_stream; reply } ->
+  let { tenant; action } = Eio.Stream.take inbox in
+  let state = match action with
+    | Dispatch { command = Protocol.Command cmd; reply } ->
+      dispatch_command state ~tenant cmd ~reply ~sw ~clock ~inbox
+    | Register { brand; push_stream; reply } ->
       let is_reregister = Map.mem state.registry tenant in
       let registry = Map.set state.registry ~key:tenant ~data:push_stream in
       Eio.Promise.resolve reply (Ok tenant);
@@ -419,13 +423,13 @@ let rec coordinator_loop state inbox ~sw ~clock =
       in
       broadcast_config state;
       state
-    | Unregister_tenant { tenant } ->
+    | Unregister ->
       let registry = Map.remove state.registry tenant in
       log "tenant %s unregistered" tenant;
       let state = { state with registry } in
       broadcast_config state;
       state
-    | Launch_timeout { tenant } ->
+    | Launch_timeout ->
       (match List.Assoc.find state.starting ~equal:String.equal tenant with
        | None -> state
        | Some sentinel ->
@@ -458,7 +462,7 @@ let rec receive_requests tenant inbox push_stream reader =
     | Ok { id; command; _ } ->
       log "req[%s]: id=%d %s" tenant id (Protocol.name_of_command command);
       let (promise, reply) = Eio.Promise.create () in
-      Eio.Stream.add inbox (Dispatch { command = Protocol.command_of_wire command; tenant; reply });
+      Eio.Stream.add inbox { tenant; action = Dispatch { command = Protocol.command_of_wire command; reply } };
       let response = Eio.Promise.await promise in
       let msg = serialize_response id response in
       log "res[%s]: %s" tenant msg;
@@ -469,7 +473,7 @@ let rec receive_requests tenant inbox push_stream reader =
 let handle_register inbox ~tenant ~brand ~register_id flow reader =
   let push_stream = Eio.Stream.create 16 in
   let (promise, reply) = Eio.Promise.create () in
-  Eio.Stream.add inbox (Register_tenant { tenant; brand; push_stream; reply });
+  Eio.Stream.add inbox { tenant; action = Register { brand; push_stream; reply } };
   match Eio.Promise.await promise with
   | Error msg ->
     let err_msg = Protocol.Wire.Response { id = register_id; response = Err { message = msg } } in
@@ -485,7 +489,7 @@ let handle_register inbox ~tenant ~brand ~register_id flow reader =
       with
       | _ -> ()
     end;
-    Eio.Stream.add inbox (Unregister_tenant { tenant })
+    Eio.Stream.add inbox { tenant; action = Unregister }
 
 (* -- Connection handling *)
 
@@ -509,7 +513,7 @@ let handle_connection inbox flow =
           handle_register inbox ~tenant ~brand ~register_id:id flow reader
         | packed_cmd ->
           let (promise, reply) = Eio.Promise.create () in
-          Eio.Stream.add inbox (Dispatch { command = packed_cmd; tenant; reply });
+          Eio.Stream.add inbox { tenant; action = Dispatch { command = packed_cmd; reply } };
           let response = Eio.Promise.await promise in
           let msg = serialize_response id response in
           log "res[%s]: %s" tenant msg;
