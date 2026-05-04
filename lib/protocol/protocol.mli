@@ -1,11 +1,5 @@
 (** Multi-tenant URL routing protocol types and serialization. *)
 
-(** {1 Address parsing} *)
-
-type address = { host : string; port : int }
-
-val parse_address : default_port:int -> string -> address
-
 val is_internal_url : string -> bool
 
 (** {1 Core data types} *)
@@ -35,8 +29,14 @@ type defaults = {
 }
 [@@deriving yojson]
 
+type listen_address = {
+  host : string;
+  port : int;
+}
+[@@deriving yojson]
+
 type config = {
-  listen : string list;
+  listen : listen_address list;
   allowed_networks : Cidr.t list;
   tenants : (string * tenant_config) list;
   rules : rule list;

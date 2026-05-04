@@ -585,8 +585,7 @@ let run config_path =
     loop ()
   in
   let listeners =
-    List.filter_map config.listen ~f:(fun addr_str ->
-      let { Protocol.host; port } = Protocol.parse_address ~default_port:Constants.default_port addr_str in
+    List.filter_map config.listen ~f:(fun ({ host; port } : Protocol.listen_address) ->
       match
         let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
         let listener = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net (`Tcp (ip, port)) in

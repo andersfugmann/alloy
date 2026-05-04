@@ -1,5 +1,8 @@
 {
-  "listen": ["127.0.0.1:7120", "[::1]:7120"],
+  "listen": [
+    { "host": "127.0.0.1", "port": 7120 },
+    { "host": "::1", "port": 7120 }
+  ],
   "allowed_networks": ["127.0.0.0/8", "::1/128"],
   "tenants": {
     "host-machine": {

@@ -1,30 +1,6 @@
 open !Base
 open !Stdio
 
-(* -- Address parsing *)
-
-type address = { host : string; port : int }
-
-let parse_address ~default_port (s : string) : address =
-  let s = String.strip s in
-  (* Handle IPv6 [host]:port *)
-  match String.lsplit2 s ~on:']' with
-  | Some (bracketed, after_bracket) ->
-    let host = String.lstrip ~drop:(Char.equal '[') bracketed in
-    let port =
-      match String.lsplit2 after_bracket ~on:':' with
-      | Some (_, p) -> Int.of_string_opt p |> Option.value ~default:default_port
-      | None -> default_port
-    in
-    { host; port }
-  | None ->
-    begin match String.rsplit2 s ~on:':' with
-    | Some (host, port_s) ->
-      let port = Int.of_string_opt port_s |> Option.value ~default:default_port in
-      { host; port }
-    | None -> { host = s; port = default_port }
-    end
-
 let internal_url_prefixes =
   [ "chrome://"; "chrome-extension://"; "about:"; "edge://"; "brave://";
     "chrome-search://"; "devtools://" ]
@@ -71,8 +47,14 @@ let tenants_of_yojson = function
     |> Result.all
   | _ -> Error "tenants: expected JSON object"
 
+type listen_address = {
+  host : string;
+  port : int;
+}
+[@@deriving yojson]
+
 type config = {
-  listen : string list;
+  listen : listen_address list;
   allowed_networks : Cidr.t list;
   tenants : tenants;
   rules : rule list;
