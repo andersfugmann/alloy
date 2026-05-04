@@ -1,13 +1,6 @@
 open !Base
 open !Stdio
 
-let internal_url_prefixes =
-  [ "chrome://"; "chrome-extension://"; "about:"; "edge://"; "brave://";
-    "chrome-search://"; "devtools://" ]
-
-let is_internal_url url =
-  List.exists internal_url_prefixes ~f:(fun prefix -> String.is_prefix url ~prefix)
-
 (* -- Core data types *)
 
 type tenant_id = string [@@deriving yojson]
@@ -166,8 +159,7 @@ let command_to_wire : type a. a command -> Wire.command = function
   | Delete_rule idx -> Delete_rule { index = idx }
   | Status -> Status
 
-let command_of_wire (w : Wire.command) : packed_command =
-  match w with
+let command_of_wire: Wire.command -> packed_command = function
   | Register { brand; _ } -> Command (Register brand)
   | Open { url } -> Command (Open url)
   | Open_on { target; url } -> Command (Open_on (target, url))
@@ -184,17 +176,17 @@ let response_to_wire : type a. a command -> (a, string) Result.t -> Wire.respons
   match resp with
   | Error msg -> Err { message = msg }
   | Ok value ->
-    (match cmd with
-     | Register _ -> Ok_registered { tenant_id = value }
-     | Open _ -> Ok_route value
-     | Open_on _ -> Ok_route value
-     | Test _ -> Ok_test value
-     | Get_config -> Ok_config value
-     | Set_config _ -> Ok_unit
-     | Add_rule _ -> Ok_unit
-     | Update_rule _ -> Ok_unit
-     | Delete_rule _ -> Ok_unit
-     | Status -> Ok_status value)
+    match cmd with
+    | Register _ -> Ok_registered { tenant_id = value }
+    | Open _ -> Ok_route value
+    | Open_on _ -> Ok_route value
+    | Test _ -> Ok_test value
+    | Get_config -> Ok_config value
+    | Set_config _ -> Ok_unit
+    | Add_rule _ -> Ok_unit
+    | Update_rule _ -> Ok_unit
+    | Delete_rule _ -> Ok_unit
+    | Status -> Ok_status value
 
 let name_of_resp = function
   | Wire.Ok_unit -> "Ok_unit"
@@ -227,9 +219,8 @@ let response_of_wire : type a. a command -> Wire.response -> (a, string) Result.
 let serialize_command_json : type a. a command -> Yojson.Safe.t =
  fun cmd -> command_to_wire cmd |> Wire.command_to_yojson
 
-let deserialize_command_json (json : Yojson.Safe.t) :
-    (packed_command, string) Result.t =
-  let* wire = Wire.command_of_yojson json in
+let deserialize_command_json str =
+  let* wire = Wire.command_of_yojson str in
   Result.return (command_of_wire wire)
 
 let name_of_command : Wire.command -> string = function
@@ -244,19 +235,18 @@ let name_of_command : Wire.command -> string = function
   | Delete_rule _ -> "Delete_rule"
   | Status -> "Status"
 
-let serialize_server_message (msg : Wire.server_message) : string =
+let serialize_server_message msg =
   Wire.server_message_to_yojson msg |> Yojson.Safe.to_string
 
-let deserialize_server_message (s : string) :
-    (Wire.server_message, string) Result.t =
-  let* json = parse_json_string s in
+let deserialize_server_message json =
+  let* json = parse_json_string json in
   Wire.server_message_of_yojson json
 
-let serialize_request (req : Wire.request) : string =
+let serialize_request req =
   Wire.request_to_yojson req |> Yojson.Safe.to_string
 
-let deserialize_request (s : string) : (Wire.request, string) Result.t =
-  let* json = parse_json_string s in
+let deserialize_request str =
+  let* json = parse_json_string str in
   Wire.request_of_yojson json
 
 (* -- Inline expect tests *)
