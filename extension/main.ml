@@ -208,9 +208,6 @@ let handle_push (state : state) (p : Protocol.Wire.push) : state =
       (id, tc.Protocol.label, Set.mem registered_set id)) in
     push (Refresh_menus { tenants });
     state
-  | Rules_updated { rules = _ } ->
-    log "Rules updated push received";
-    state
 
 let handle_bridge_message (state : state) (raw : string) : state =
   match json_of_string raw with

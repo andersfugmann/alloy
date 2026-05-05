@@ -305,13 +305,6 @@ let broadcast_config (state : state) : unit =
   Map.iter state.registry ~f:(fun stream ->
     Eio.Stream.add stream s)
 
-let broadcast_rules (state : state) : unit =
-  let push_wire = Protocol.Wire.Rules_updated { rules = state.rules } in
-  let msg = Protocol.Wire.Push { id = 0; push = push_wire } in
-  let s = Protocol.serialize_server_message msg in
-  Map.iter state.registry ~f:(fun stream ->
-    Eio.Stream.add stream s)
-
 let flush_pending_deliveries state tenant push_stream =
   match List.Assoc.find state.starting ~equal:String.equal tenant with
   | None -> state
@@ -406,7 +399,6 @@ let dispatch_command :
   | Protocol.Set_rules rules ->
     let (state, resp) = handle_set_rules state rules in
     resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_rules state);
     state
   | Protocol.Status ->
     let (state, resp) = handle_status state in

@@ -138,7 +138,6 @@ module Wire = struct
     | Navigate of { url : string }
     | Registered of { tenant_id : string }
     | Config_updated of { config : config; registered_tenants : string list }
-    | Rules_updated of { rules : rule list }
   [@@deriving yojson]
 
   type request = {

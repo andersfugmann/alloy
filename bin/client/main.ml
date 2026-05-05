@@ -238,8 +238,6 @@ let run_register ~net ~host ~port ~tenant =
        | Ok (Push { id = _; push = Config_updated { config = cfg; registered_tenants } }) ->
          printf "CONFIG_UPDATED tenants=%d registered=%d\n%!"
            (List.length cfg.tenants) (List.length registered_tenants)
-       | Ok (Push { id = _; push = Rules_updated { rules } }) ->
-         printf "RULES_UPDATED count=%d\n%!" (List.length rules)
        | Ok (Push { id = _; push = Registered { tenant_id } }) ->
          printf "RE-REGISTERED %s\n%!" tenant_id
        | Ok (Response _) ->
