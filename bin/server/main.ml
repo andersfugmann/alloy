@@ -21,16 +21,30 @@ type compiled_rule = {
   regex : Re.re;
 }
 
+let push_queue_capacity = 16
+
+type tenant_connection = {
+  push_stream : string Eio.Stream.t;
+  close : unit -> unit;
+}
+
 type state = {
   config : Protocol.config;
   config_path : string;
   rules : Protocol.rule list;
   compiled_rules : compiled_rule list;
-  registry : string Eio.Stream.t Map.M(String).t;
+  registry : tenant_connection Map.M(String).t;
   starting : (string * starting_tenant) list;
   cooldowns : cooldown_entry list;
   start_time : float;
 }
+
+(* Try to push a message to a tenant connection.
+   Returns true on success, false if queue is full (client presumed dead). *)
+let try_push (conn : tenant_connection) (msg : string) : bool =
+  match Eio.Stream.length conn.push_stream < push_queue_capacity with
+  | true -> Eio.Stream.add conn.push_stream msg; true
+  | false -> conn.close (); false
 
 (* -- Coordinator messages *)
 
@@ -38,7 +52,7 @@ type coordinator_action =
   | Dispatch of {
       request : Protocol.packed_request;
       reply : (Yojson.Safe.t, string) Result.t Eio.Promise.u;
-      push_stream : string Eio.Stream.t;
+      connection : tenant_connection;
     }
   | Unregister
   | Launch_timeout
@@ -186,10 +200,17 @@ let launch_browser cmd =
 
 let deliver_url state target url ~sw ~clock ~inbox =
   match Map.find state.registry target with
-  | Some stream ->
+  | Some conn ->
     let push_msg = Protocol.Push { id = 0; push = Navigate { url } } in
-    Eio.Stream.add stream (Protocol.serialize_server_message push_msg);
-    (state, Eio.Promise.create_resolved (Ok (Protocol.Remote target)))
+    (match try_push conn (Protocol.serialize_server_message push_msg) with
+     | true ->
+       (state, Eio.Promise.create_resolved (Ok (Protocol.Remote target)))
+     | false ->
+       log "deliver: tenant %s push queue full, disconnecting" target;
+       let registry = Map.remove state.registry target in
+       let state = { state with registry } in
+       let msg = Printf.sprintf "tenant %s connection stale" target in
+       (state, Eio.Promise.create_resolved (Error msg)))
   | None ->
     let existing_sentinel = List.Assoc.find state.starting ~equal:String.equal target in
     let sentinel =
@@ -297,21 +318,28 @@ let handle_set_rules state (rules : Protocol.rule list) =
 
 (* -- Command dispatch *)
 
-let broadcast_config (state : state) : unit =
+let broadcast_config (state : state) : state =
   let registered = Map.keys state.registry in
   let push = Protocol.Config_updated { config = state.config; registered_tenants = registered } in
   let msg = Protocol.Push { id = 0; push } in
   let s = Protocol.serialize_server_message msg in
-  Map.iter state.registry ~f:(fun stream ->
-    Eio.Stream.add stream s)
+  let registry =
+    Map.filter state.registry ~f:(fun conn ->
+      match try_push conn s with
+      | true -> true
+      | false ->
+        log "broadcast: push queue full, disconnecting stale client";
+        false)
+  in
+  { state with registry }
 
-let flush_pending_deliveries state tenant push_stream =
+let flush_pending_deliveries state tenant conn =
   match List.Assoc.find state.starting ~equal:String.equal tenant with
   | None -> state
   | Some sentinel ->
     List.iter sentinel.pending ~f:(fun pd ->
       let push_msg = Protocol.Push { id = 0; push = Navigate { url = pd.url } } in
-      Eio.Stream.add push_stream (Protocol.serialize_server_message push_msg);
+      let _delivered = try_push conn (Protocol.serialize_server_message push_msg) in
       Eio.Promise.resolve pd.reply (Ok (Protocol.Remote tenant));
       log "delivered pending URL to %s: %s" tenant pd.url);
     let starting = List.Assoc.remove state.starting ~equal:String.equal tenant in
@@ -342,14 +370,14 @@ let update_tenant_config state tenant brand =
   state
 
 let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json))
-    ~reply ~push_stream ~sw ~clock ~inbox =
+    ~reply ~connection ~sw ~clock ~inbox =
   let resolve result =
     Eio.Promise.resolve reply (Result.map result ~f:resp_to_json)
   in
   match cmd with
   | Protocol.Register ->
     let is_reregister = Map.mem state.registry tenant in
-    let registry = Map.set state.registry ~key:tenant ~data:push_stream in
+    let registry = Map.set state.registry ~key:tenant ~data:connection in
     resolve (Ok tenant);
     let state = { state with registry } in
     let state =
@@ -361,11 +389,10 @@ let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json)
         log "tenant %s registered (brand=%s)" tenant
           (Option.value params.brand ~default:"(none)");
         state
-        |> fun s -> flush_pending_deliveries s tenant push_stream
+        |> fun s -> flush_pending_deliveries s tenant connection
         |> fun s -> update_tenant_config s tenant params.brand
     in
-    broadcast_config state;
-    state
+    broadcast_config state
   | Protocol.Open ->
     let (state, promise) = handle_open state tenant params.url ~sw ~clock ~inbox in
     Eio.Fiber.fork ~sw (fun () ->
@@ -388,8 +415,9 @@ let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json)
   | Protocol.Set_config ->
     let (state, resp) = handle_set_config state params in
     resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
+    (match resp with
+     | Ok () -> broadcast_config state
+     | Error _ -> state)
   | Protocol.Get_rules ->
     resolve (Ok state.rules);
     state
@@ -407,14 +435,12 @@ let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json)
 let rec coordinator_loop state inbox ~sw ~clock =
   let { tenant; action } = Eio.Stream.take inbox in
   let state = match action with
-    | Dispatch { request; reply; push_stream } ->
-      dispatch_command state ~tenant request ~reply ~push_stream ~sw ~clock ~inbox
+    | Dispatch { request; reply; connection } ->
+      dispatch_command state ~tenant request ~reply ~connection ~sw ~clock ~inbox
     | Unregister ->
       let registry = Map.remove state.registry tenant in
       log "tenant %s unregistered" tenant;
-      let state = { state with registry } in
-      broadcast_config state;
-      state
+      broadcast_config { state with registry }
     | Launch_timeout ->
       (match List.Assoc.find state.starting ~equal:String.equal tenant with
        | None -> state
@@ -440,14 +466,15 @@ let serialize_response id result =
   Protocol.Response (Protocol.make_response_envelope id result)
   |> Protocol.serialize_server_message
 
-let rec receive_requests ~tenant inbox push_stream reader =
+let rec receive_requests ~tenant inbox connection reader =
   match Eio.Buf_read.line reader with
-  | exception _ -> tenant
+  | exception End_of_file -> tenant
+  | exception Eio.Io _ -> tenant
   | line ->
     match Protocol.deserialize_request_envelope line with
     | Error msg ->
       log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
-      receive_requests ~tenant inbox push_stream reader
+      receive_requests ~tenant inbox connection reader
     | Ok env ->
       let tenant_name = Option.value (Option.first_some env.tenant tenant) ~default:"anonymous" in
       log "req[%s]: id=%d %s" tenant_name env.id env.command;
@@ -455,15 +482,15 @@ let rec receive_requests ~tenant inbox push_stream reader =
       | Error msg ->
         log "req[%s]: command error: %s" tenant_name msg;
         let msg = serialize_response env.id (Error msg) in
-        Eio.Stream.add push_stream msg;
-        receive_requests ~tenant inbox push_stream reader
+        Eio.Stream.add connection.push_stream msg;
+        receive_requests ~tenant inbox connection reader
       | Ok request ->
         let (promise, reply) = Eio.Promise.create () in
-        Eio.Stream.add inbox { tenant = tenant_name; action = Dispatch { request; reply; push_stream } };
+        Eio.Stream.add inbox { tenant = tenant_name; action = Dispatch { request; reply; connection } };
         let result = Eio.Promise.await promise in
         let msg = serialize_response env.id result in
         log "res[%s]: %s" tenant_name msg;
-        Eio.Stream.add push_stream msg;
+        Eio.Stream.add connection.push_stream msg;
         let tenant =
           match result with
           | Ok _ ->
@@ -472,17 +499,19 @@ let rec receive_requests ~tenant inbox push_stream reader =
              | false -> tenant)
           | Error _ -> tenant
         in
-        receive_requests ~tenant inbox push_stream reader
+        receive_requests ~tenant inbox connection reader
 
 let handle_connection inbox flow =
-  let push_stream = Eio.Stream.create 16 in
+  let push_stream = Eio.Stream.create push_queue_capacity in
+  let connection = { push_stream; close = (fun () -> Eio.Flow.close flow) } in
   let tenant =
     Eio.Switch.run @@ fun sw ->
     Eio.Fiber.fork_daemon ~sw (fun () ->
-      (try forward_pushes push_stream flow with _ -> ());
+      (try forward_pushes push_stream flow
+       with Eio.Cancel.Cancelled _ as ex -> raise ex | _ -> ());
       `Stop_daemon);
     let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
-    receive_requests ~tenant:None inbox push_stream reader
+    receive_requests ~tenant:None inbox connection reader
   in
   match tenant with
   | Some name -> Eio.Stream.add inbox { tenant = name; action = Unregister }

@@ -305,19 +305,14 @@ let run_bridge env =
        | Ok env ->
          (match String.equal env.command "register" with
           | true ->
-            let name =
+            let (name, address, brand) =
               match Protocol.register_params_of_yojson env.params with
-              | Ok p -> p.name
-              | Error _ -> None
-            in
-            let address =
-              match Protocol.register_params_of_yojson env.params with
-              | Ok p -> p.address
-              | Error _ -> None
+              | Ok p -> (p.name, p.address, p.brand)
+              | Error _ -> (None, None, None)
             in
             let tenant = Option.value name ~default:default_tenant in
             let patched_params : Protocol.register_params = {
-              brand = (match Protocol.register_params_of_yojson env.params with Ok p -> p.brand | Error _ -> None);
+              brand;
               address = None;
               name = Some tenant;
             } in
