@@ -60,14 +60,14 @@ and packed_handler =
       cmd : ('req, 'resp) Protocol.command;
       deserialize : Yojson.Safe.t -> ('req, string) Result.t;
       serialize : 'resp -> Yojson.Safe.t;
-      handle : 'req -> handler_env -> resolve:(('resp, string) Result.t -> unit) -> state;
+      handle : 'req -> handler_env -> respond:(('resp, string) Result.t -> unit) -> state;
     } -> packed_handler
 
 and coordinator_action =
   | Dispatch of {
       handler : packed_handler;
-      params_json : Yojson.Safe.t;
-      reply : (Yojson.Safe.t, string) Result.t Eio.Promise.u;
+      request_json : Yojson.Safe.t;
+      request_id : int;
       connection : tenant_connection;
     }
   | Unregister
@@ -391,57 +391,57 @@ let update_tenant_config state tenant brand =
 
 (* -- Individual handler functions *)
 
-let handle_register params env ~resolve =
+let handle_register params env ~respond =
   let registry = Map.set env.state.registry ~key:env.tenant ~data:env.connection in
-  resolve (Ok env.tenant);
+  respond (Ok env.tenant);
   log "tenant %s registered (brand=%s)" env.tenant (Option.value params.Protocol.brand ~default:"(none)");
   { env.state with registry }
   |> fun s -> flush_pending_deliveries s env.tenant env.connection
   |> fun s -> update_tenant_config s env.tenant params.brand
   |> broadcast_config
 
-let handle_open_cmd (params : Protocol.open_request) env ~resolve =
+let handle_open_cmd (params : Protocol.open_request) env ~respond =
   let (state, promise) = handle_open env.state env.tenant params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
-    resolve result);
+    respond result);
   state
 
-let handle_open_on_cmd params env ~resolve =
+let handle_open_on_cmd params env ~respond =
   let (state, promise) = handle_open_on env.state params.Protocol.target params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
-    resolve result);
+    respond result);
   state
 
-let handle_test_cmd (params : Protocol.open_request) env ~resolve =
+let handle_test_cmd (params : Protocol.open_request) env ~respond =
   let (state, resp) = handle_test env.state params.Protocol.url in
-  resolve resp;
+  respond resp;
   state
 
-let handle_get_config _params env ~resolve =
-  resolve (Ok env.state.config);
+let handle_get_config _params env ~respond =
+  respond (Ok env.state.config);
   env.state
 
-let handle_set_config_cmd params env ~resolve =
+let handle_set_config_cmd params env ~respond =
   let (state, resp) = handle_set_config env.state params in
-  resolve resp;
+  respond resp;
   (match resp with
    | Ok () -> broadcast_config state
    | Error _ -> state)
 
-let handle_get_rules _params env ~resolve =
-  resolve (Ok env.state.rules);
+let handle_get_rules _params env ~respond =
+  respond (Ok env.state.rules);
   env.state
 
-let handle_set_rules_cmd params env ~resolve =
+let handle_set_rules_cmd params env ~respond =
   let (state, resp) = handle_set_rules env.state params in
-  resolve resp;
+  respond resp;
   state
 
-let handle_status_cmd _params env ~resolve =
+let handle_status_cmd _params env ~respond =
   let (state, resp) = handle_status env.state in
-  resolve resp;
+  respond resp;
   state
 
 (* -- Command lookup: single match on string → handler bundle *)
@@ -503,25 +503,36 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
     })
   | name -> Result.failf "unknown command: %s" name
 
+(* -- Response formatting *)
+
+let serialize_response id result =
+  Protocol.Response (Protocol.make_response_envelope id result)
+  |> Protocol.serialize_server_message
+
 (* -- Generic executor: no GADT matching *)
 
-let execute_handler (Handler { cmd = _; deserialize; serialize; handle }) params_json env reply =
-  match deserialize params_json with
+let execute_handler (Handler { cmd = _; deserialize; serialize; handle }) request_json request_id env =
+  match deserialize request_json with
   | Error msg ->
-    Eio.Promise.resolve reply (Error msg);
+    let response = serialize_response request_id (Error msg) in
+    Eio.Stream.add env.connection.push_stream response;
     env.state
-  | Ok params ->
-    let resolve result = Eio.Promise.resolve reply (Result.map result ~f:serialize) in
-    handle params env ~resolve
+  | Ok request ->
+    let respond result =
+      let json_result = Result.map result ~f:serialize in
+      let response = serialize_response request_id json_result in
+      Eio.Stream.add env.connection.push_stream response
+    in
+    handle request env ~respond
 
 (* -- Coordinator loop *)
 
 let rec coordinator_loop state inbox ~sw ~clock =
   let { sender; action } = Eio.Stream.take inbox in
   let state = match action with
-    | Dispatch { handler; params_json; reply; connection } ->
+    | Dispatch { handler; request_json; request_id; connection } ->
       let env = { state; tenant = sender; connection; sw; clock; inbox } in
-      execute_handler handler params_json env reply
+      execute_handler handler request_json request_id env
     | Unregister ->
       let registry = Map.remove state.registry sender in
       log "tenant %s unregistered" sender;
@@ -547,10 +558,6 @@ let rec forward_pushes push_stream flow =
   Eio.Flow.copy_string (msg ^ "\n") flow;
   forward_pushes push_stream flow
 
-let serialize_response id result =
-  Protocol.Response (Protocol.make_response_envelope id result)
-  |> Protocol.serialize_server_message
-
 let rec receive_requests ~tenant inbox connection reader =
   match Eio.Buf_read.line reader with
   | exception End_of_file -> tenant
@@ -566,23 +573,15 @@ let rec receive_requests ~tenant inbox connection reader =
       match lookup_handler env.command with
       | Error msg ->
         log "req[%s]: command error: %s" tenant_name msg;
-        let msg = serialize_response env.id (Error msg) in
-        Eio.Stream.add connection.push_stream msg;
+        let response = serialize_response env.id (Error msg) in
+        Eio.Stream.add connection.push_stream response;
         receive_requests ~tenant inbox connection reader
       | Ok handler ->
-        let (promise, reply) = Eio.Promise.create () in
-        Eio.Stream.add inbox { sender = tenant_name; action = Dispatch { handler; params_json = env.params; reply; connection } };
-        let result = Eio.Promise.await promise in
-        let msg = serialize_response env.id result in
-        log "res[%s]: %s" tenant_name msg;
-        Eio.Stream.add connection.push_stream msg;
+        Eio.Stream.add inbox { sender = tenant_name; action = Dispatch { handler; request_json = env.params; request_id = env.id; connection } };
         let tenant =
-          match result with
-          | Ok _ ->
-            (match String.equal env.command "register" with
-             | true -> Some tenant_name
-             | false -> tenant)
-          | Error _ -> tenant
+          match String.equal env.command "register" with
+          | true -> Some tenant_name
+          | false -> tenant
         in
         receive_requests ~tenant inbox connection reader
 
