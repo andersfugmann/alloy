@@ -265,51 +265,7 @@ let deliver_url state target url ~sw ~clock ~inbox =
       let starting = List.Assoc.add state.starting ~equal:String.equal target { pending } in
       ({ state with starting }, promise)
 
-(* -- Command handlers *)
-
-let handle_open state tenant url ~sw ~clock ~inbox =
-  let target, _ =
-    Option.value ~default:(state.config.defaults.unmatched, 0) (find_matching_rule state.compiled_rules url)
-  in
-  let now = Unix.gettimeofday () in
-  let (in_cooldown, pruned) = check_and_prune_cooldowns state.cooldowns ~now ~key:url in
-  let state = { state with cooldowns = pruned } in
-  let target =
-    match in_cooldown || String.equal target tenant with
-    | true -> "local"
-    | false -> target
-  in
-  let cooldowns =
-    match String.equal target "local" with
-    | true -> state.cooldowns
-    | false ->
-      let cooldown = Float.of_int state.config.defaults.cooldown_seconds in
-      { key = url; expires = now +. cooldown } :: state.cooldowns
-  in
-  let state = { state with cooldowns } in
-  match String.equal target "local" with
-  | true -> (state, Eio.Promise.create_resolved (Ok Protocol.Local))
-  | false -> deliver_url state target url ~sw ~clock ~inbox
-
-let handle_open_on state target url ~sw ~clock ~inbox =
-  match String.equal target "local" with
-  | true -> (state, Eio.Promise.create_resolved (Ok Protocol.Local))
-  | false -> deliver_url state target url ~sw ~clock ~inbox
-
-let handle_test state url =
-  let result =
-    match find_matching_rule state.compiled_rules url with
-    | Some (target, idx) -> Protocol.Match { tenant = target; rule_index = idx }
-    | None -> Protocol.No_match { default_tenant = state.config.defaults.unmatched }
-  in
-  (state, Ok result)
-
-let handle_status state =
-  let tenants = Map.keys state.registry in
-  let uptime =
-    Unix.gettimeofday () -. state.start_time |> Float.to_int
-  in
-  (state, Ok { Protocol.registered_tenants = tenants; uptime_seconds = uptime })
+(* -- State helpers *)
 
 let try_save_config state =
   try
@@ -324,19 +280,6 @@ let try_save_rules state =
     Ok ()
   with exn ->
     Error (Printf.sprintf "failed to save rules: %s" (Exn.to_string exn))
-
-let handle_set_config state (cfg : Protocol.config) =
-  let state = { state with config = cfg } in
-  (state, try_save_config state)
-
-let handle_set_rules state (rules : Protocol.rule list) =
-  match compile_rules rules with
-  | Error msg -> (state, Error (Printf.sprintf "invalid rules: %s" msg))
-  | Ok compiled_rules ->
-    let state = { state with rules; compiled_rules } in
-    (state, try_save_rules state)
-
-(* -- Command dispatch *)
 
 let broadcast_config (state : state) : state =
   let registered = Map.keys state.registry in
@@ -389,7 +332,7 @@ let update_tenant_config state tenant brand =
   let _ = try_save_config state in
   state
 
-(* -- Individual handler functions *)
+(* -- Handler functions *)
 
 let handle_register params env ~respond =
   let registry = Map.set env.state.registry ~key:env.tenant ~data:env.connection in
@@ -400,49 +343,92 @@ let handle_register params env ~respond =
   |> fun s -> update_tenant_config s env.tenant params.brand
   |> broadcast_config
 
-let handle_open_cmd (params : Protocol.open_request) env ~respond =
-  let (state, promise) = handle_open env.state env.tenant params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
-  Eio.Fiber.fork ~sw:env.sw (fun () ->
-    let result = Eio.Promise.await promise in
-    respond result);
-  state
+let handle_open (request : Protocol.open_request) env ~respond =
+  let url = request.url in
+  let target, _ =
+    Option.value ~default:(env.state.config.defaults.unmatched, 0)
+      (find_matching_rule env.state.compiled_rules url)
+  in
+  let now = Unix.gettimeofday () in
+  let (in_cooldown, pruned) = check_and_prune_cooldowns env.state.cooldowns ~now ~key:url in
+  let state = { env.state with cooldowns = pruned } in
+  let target =
+    match in_cooldown || String.equal target env.tenant with
+    | true -> "local"
+    | false -> target
+  in
+  let cooldowns =
+    match String.equal target "local" with
+    | true -> state.cooldowns
+    | false ->
+      let cooldown = Float.of_int state.config.defaults.cooldown_seconds in
+      { key = url; expires = now +. cooldown } :: state.cooldowns
+  in
+  let state = { state with cooldowns } in
+  match String.equal target "local" with
+  | true ->
+    respond (Ok Protocol.Local);
+    state
+  | false ->
+    let (state, promise) = deliver_url state target url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+    Eio.Fiber.fork ~sw:env.sw (fun () ->
+      let result = Eio.Promise.await promise in
+      respond result);
+    state
 
-let handle_open_on_cmd params env ~respond =
-  let (state, promise) = handle_open_on env.state params.Protocol.target params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
-  Eio.Fiber.fork ~sw:env.sw (fun () ->
-    let result = Eio.Promise.await promise in
-    respond result);
-  state
+let handle_open_on (request : Protocol.open_on_request) env ~respond =
+  match String.equal request.target "local" with
+  | true ->
+    respond (Ok Protocol.Local);
+    env.state
+  | false ->
+    let (state, promise) = deliver_url env.state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+    Eio.Fiber.fork ~sw:env.sw (fun () ->
+      let result = Eio.Promise.await promise in
+      respond result);
+    state
 
-let handle_test_cmd (params : Protocol.open_request) env ~respond =
-  let (state, resp) = handle_test env.state params.Protocol.url in
-  respond resp;
-  state
+let handle_test (request : Protocol.open_request) env ~respond =
+  let result =
+    match find_matching_rule env.state.compiled_rules request.url with
+    | Some (target, idx) -> Protocol.Match { tenant = target; rule_index = idx }
+    | None -> Protocol.No_match { default_tenant = env.state.config.defaults.unmatched }
+  in
+  respond (Ok result);
+  env.state
 
-let handle_get_config _params env ~respond =
+let handle_get_config _request env ~respond =
   respond (Ok env.state.config);
   env.state
 
-let handle_set_config_cmd params env ~respond =
-  let (state, resp) = handle_set_config env.state params in
+let handle_set_config config env ~respond =
+  let state = { env.state with config } in
+  let resp = try_save_config state in
   respond resp;
   (match resp with
    | Ok () -> broadcast_config state
    | Error _ -> state)
 
-let handle_get_rules _params env ~respond =
+let handle_get_rules _request env ~respond =
   respond (Ok env.state.rules);
   env.state
 
-let handle_set_rules_cmd params env ~respond =
-  let (state, resp) = handle_set_rules env.state params in
-  respond resp;
-  state
+let handle_set_rules rules env ~respond =
+  match compile_rules rules with
+  | Error msg ->
+    respond (Error (Printf.sprintf "invalid rules: %s" msg));
+    env.state
+  | Ok compiled_rules ->
+    let state = { env.state with rules; compiled_rules } in
+    let resp = try_save_rules state in
+    respond resp;
+    state
 
-let handle_status_cmd _params env ~respond =
-  let (state, resp) = handle_status env.state in
-  respond resp;
-  state
+let handle_status _request env ~respond =
+  let tenants = Map.keys env.state.registry in
+  let uptime = Unix.gettimeofday () -. env.state.start_time |> Float.to_int in
+  respond (Ok { Protocol.registered_tenants = tenants; uptime_seconds = uptime });
+  env.state
 
 (* -- Command lookup: single match on string → handler bundle *)
 
@@ -457,19 +443,19 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
       cmd = Open;
       deserialize = Protocol.open_request_of_yojson;
       serialize = Protocol.route_result_to_yojson;
-      handle = handle_open_cmd;
+      handle = handle_open;
     })
   | "open_on" -> Ok (Handler {
       cmd = Open_on;
       deserialize = Protocol.open_on_request_of_yojson;
       serialize = Protocol.route_result_to_yojson;
-      handle = handle_open_on_cmd;
+      handle = handle_open_on;
     })
   | "test" -> Ok (Handler {
       cmd = Test;
       deserialize = Protocol.open_request_of_yojson;
       serialize = Protocol.test_result_to_yojson;
-      handle = handle_test_cmd;
+      handle = handle_test;
     })
   | "get_config" -> Ok (Handler {
       cmd = Get_config;
@@ -481,7 +467,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
       cmd = Set_config;
       deserialize = Protocol.config_of_yojson;
       serialize = (fun () -> `Null);
-      handle = handle_set_config_cmd;
+      handle = handle_set_config;
     })
   | "get_rules" -> Ok (Handler {
       cmd = Get_rules;
@@ -493,13 +479,13 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
       cmd = Set_rules;
       deserialize = Protocol.rules_of_yojson;
       serialize = (fun () -> `Null);
-      handle = handle_set_rules_cmd;
+      handle = handle_set_rules;
     })
   | "status" -> Ok (Handler {
       cmd = Status;
       deserialize = (fun _ -> Ok ());
       serialize = Protocol.status_info_to_yojson;
-      handle = handle_status_cmd;
+      handle = handle_status;
     })
   | name -> Result.failf "unknown command: %s" name
 
