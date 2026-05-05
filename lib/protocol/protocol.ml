@@ -82,22 +82,35 @@ type test_result =
   | No_match of { default_tenant : tenant_id }
 [@@deriving yojson]
 
+(* -- Request parameter types *)
+
+type register_params = {
+  brand : string option; [@default None]
+  address : string option; [@default None]
+  name : string option; [@default None]
+}
+[@@deriving yojson]
+
+type open_params = { url : string } [@@deriving yojson]
+type open_on_params = { target : string; url : string } [@@deriving yojson]
+
 (* -- GADT command type *)
 
-type _ command =
-  | Register : string option -> string command
-  | Open : url -> route_result command
-  | Open_on : tenant_id * url -> route_result command
-  | Test : url -> test_result command
-  | Get_config : config command
-  | Set_config : config -> unit command
-  | Get_rules : rule list command
-  | Set_rules : rule list -> unit command
-  | Status : status_info command
+type (_, _) command =
+  | Register : (register_params, string) command
+  | Open : (open_params, route_result) command
+  | Open_on : (open_on_params, route_result) command
+  | Test : (open_params, test_result) command
+  | Get_config : (unit, config) command
+  | Set_config : (config, unit) command
+  | Get_rules : (unit, rule list) command
+  | Set_rules : (rule list, unit) command
+  | Status : (unit, status_info) command
 
-(* -- Existential wrappers *)
+(* -- Existential wrapper *)
 
-type packed_command = Command : 'a command -> packed_command
+type packed_request =
+  | Request : ('req, 'resp) command * 'req * ('resp -> Yojson.Safe.t) -> packed_request
 
 (* -- Helpers *)
 
@@ -108,167 +121,168 @@ let parse_json_string (s : string) : (Yojson.Safe.t, string) Result.t =
   | json -> Result.return json
   | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
-(* -- JSON wire types *)
+(* -- JSON identity for embedding raw JSON in wire envelopes *)
 
-module Wire = struct
-  type command =
-    | Register of { brand : string option [@default None]; address : string option [@default None]; name : string option [@default None] }
-    | Open of { url : string }
-    | Open_on of { target : string; url : string }
-    | Test of { url : string }
-    | Get_config
-    | Set_config of { config : config }
-    | Get_rules
-    | Set_rules of { rules : rule list }
-    | Status
-  [@@deriving yojson]
+type json = Yojson.Safe.t
+let json_to_yojson (x : json) : Yojson.Safe.t = x
+let json_of_yojson (x : Yojson.Safe.t) : (json, string) Result.t = Ok x
 
-  type response =
-    | Ok_unit
-    | Ok_registered of { tenant_id : string }
-    | Ok_route of route_result
-    | Ok_test of test_result
-    | Ok_config of config
-    | Ok_rules of rule list
-    | Ok_status of status_info
-    | Err of { message : string }
-  [@@deriving yojson]
+(* -- Wire envelope types *)
 
-  type push =
-    | Navigate of { url : string }
-    | Registered of { tenant_id : string }
-    | Config_updated of { config : config; registered_tenants : string list }
-  [@@deriving yojson]
+type request_envelope = {
+  id : int;
+  command : string;
+  params : json; [@default `Null]
+  tenant : string option; [@default None]
+}
+[@@deriving yojson]
 
-  type request = {
-    id : int;
-    command : command;
-    tenant : string option; [@default None]
-  }
-  [@@deriving yojson]
+type response_envelope = {
+  id : int;
+  success : bool;
+  payload : json; [@default `Null]
+  error : string option; [@default None]
+}
+[@@deriving yojson]
 
-  type server_message =
-    | Response of { id : int; response : response }
-    | Push of { id : int; push : push }
-  [@@deriving yojson]
-end
+(* -- Push messages *)
 
-(* -- Wire type conversions *)
+type push =
+  | Navigate of { url : string }
+  | Registered of { tenant_id : string }
+  | Config_updated of { config : config; registered_tenants : string list }
+[@@deriving yojson]
 
-let command_to_wire : type a. a command -> Wire.command = function
-  | Register brand -> Register { brand; address = None; name = None }
-  | Open url -> Open { url }
-  | Open_on (target, url) -> Open_on { target; url }
-  | Test url -> Test { url }
-  | Get_config -> Get_config
-  | Set_config cfg -> Set_config { config = cfg }
-  | Get_rules -> Get_rules
-  | Set_rules rules -> Set_rules { rules }
-  | Status -> Status
+type server_message =
+  | Response of response_envelope
+  | Push of { id : int; push : push }
+[@@deriving yojson]
 
-let command_of_wire: Wire.command -> packed_command = function
-  | Register { brand; _ } -> Command (Register brand)
-  | Open { url } -> Command (Open url)
-  | Open_on { target; url } -> Command (Open_on (target, url))
-  | Test { url } -> Command (Test url)
-  | Get_config -> Command Get_config
-  | Set_config { config } -> Command (Set_config config)
-  | Get_rules -> Command Get_rules
-  | Set_rules { rules } -> Command (Set_rules rules)
-  | Status -> Command Status
+(* -- Command serialization *)
 
-let response_to_wire : type a. a command -> (a, string) Result.t -> Wire.response =
- fun cmd resp ->
-  match resp with
-  | Error msg -> Err { message = msg }
-  | Ok value ->
-    match cmd with
-    | Register _ -> Ok_registered { tenant_id = value }
-    | Open _ -> Ok_route value
-    | Open_on _ -> Ok_route value
-    | Test _ -> Ok_test value
-    | Get_config -> Ok_config value
-    | Set_config _ -> Ok_unit
-    | Get_rules -> Ok_rules value
-    | Set_rules _ -> Ok_unit
-    | Status -> Ok_status value
+let command_name : type req resp. (req, resp) command -> string = function
+  | Register -> "register"
+  | Open -> "open"
+  | Open_on -> "open_on"
+  | Test -> "test"
+  | Get_config -> "get_config"
+  | Set_config -> "set_config"
+  | Get_rules -> "get_rules"
+  | Set_rules -> "set_rules"
+  | Status -> "status"
 
-let name_of_resp = function
-  | Wire.Ok_unit -> "Ok_unit"
-  | Wire.Ok_registered _ -> "Ok_registered"
-  | Wire.Ok_route _ -> "Ok_route"
-  | Wire.Ok_test _ -> "Ok_test"
-  | Wire.Ok_config _ -> "Ok_config"
-  | Wire.Ok_rules _ -> "Ok_rules"
-  | Wire.Ok_status _ -> "Ok_status"
-  | Wire.Err _ -> "Err"
+let serialize_params : type req resp. (req, resp) command -> req -> Yojson.Safe.t =
+  fun cmd params -> match cmd with
+  | Register -> register_params_to_yojson params
+  | Open -> open_params_to_yojson params
+  | Open_on -> open_on_params_to_yojson params
+  | Test -> open_params_to_yojson params
+  | Get_config -> `Null
+  | Set_config -> config_to_yojson params
+  | Get_rules -> `Null
+  | Set_rules -> rules_to_yojson params
+  | Status -> `Null
 
-let response_of_wire : type a. a command -> Wire.response -> (a, string) Result.t =
-  fun cmd resp ->
-  let open Result in
-  match resp, cmd with
-  | Err { message }, _ -> fail message
-  | Ok_registered { tenant_id }, Register _ -> return tenant_id
-  | Ok_route r, Open _ -> return r
-  | Ok_route r, Open_on _ -> return r
-  | Ok_test t, Test _  -> return t
-  | Ok_config c, Get_config -> return c
-  | Ok_rules r, Get_rules -> return r
-  | Ok_status s, Status -> return s
-  | Ok_unit, Set_config _ -> return ()
-  | Ok_unit, Set_rules _ -> return ()
-  | resp, _ -> failf "unexpected %s" (name_of_resp resp)
+let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
+  | Register -> (fun s -> `String s)
+  | Open -> route_result_to_yojson
+  | Open_on -> route_result_to_yojson
+  | Test -> test_result_to_yojson
+  | Get_config -> config_to_yojson
+  | Set_config -> (fun () -> `Null)
+  | Get_rules -> rules_to_yojson
+  | Set_rules -> (fun () -> `Null)
+  | Status -> status_info_to_yojson
 
-(* -- JSON serialization helpers *)
+let pack : type req resp. (req, resp) command -> req -> packed_request =
+  fun cmd params -> Request (cmd, params, response_serializer cmd)
 
-let serialize_command_json : type a. a command -> Yojson.Safe.t =
- fun cmd -> command_to_wire cmd |> Wire.command_to_yojson
+let deserialize_request (name : string) (params : Yojson.Safe.t) : (packed_request, string) Result.t =
+  let rs = response_serializer in
+  match name with
+  | "register" ->
+    let* p = register_params_of_yojson params in
+    Ok (Request (Register, p, rs Register))
+  | "open" ->
+    let* p = open_params_of_yojson params in
+    Ok (Request (Open, p, rs Open))
+  | "open_on" ->
+    let* p = open_on_params_of_yojson params in
+    Ok (Request (Open_on, p, rs Open_on))
+  | "test" ->
+    let* p = open_params_of_yojson params in
+    Ok (Request (Test, p, rs Test))
+  | "get_config" ->
+    Ok (Request (Get_config, (), rs Get_config))
+  | "set_config" ->
+    let* c = config_of_yojson params in
+    Ok (Request (Set_config, c, rs Set_config))
+  | "get_rules" ->
+    Ok (Request (Get_rules, (), rs Get_rules))
+  | "set_rules" ->
+    let* r = rules_of_yojson params in
+    Ok (Request (Set_rules, r, rs Set_rules))
+  | "status" ->
+    Ok (Request (Status, (), rs Status))
+  | _ -> Result.failf "unknown command: %s" name
 
-let deserialize_command_json str =
-  let* wire = Wire.command_of_yojson str in
-  Result.return (command_of_wire wire)
+let deserialize_response : type req resp. (req, resp) command -> Yojson.Safe.t -> (resp, string) Result.t =
+  fun cmd payload -> match cmd with
+  | Register ->
+    (match payload with
+     | `String s -> Ok s
+     | _ -> Error "register: expected string")
+  | Open -> route_result_of_yojson payload
+  | Open_on -> route_result_of_yojson payload
+  | Test -> test_result_of_yojson payload
+  | Get_config -> config_of_yojson payload
+  | Set_config -> Ok ()
+  | Get_rules -> rules_of_yojson payload
+  | Set_rules -> Ok ()
+  | Status -> status_info_of_yojson payload
 
-let name_of_command : Wire.command -> string = function
-  | Register _ -> "Register"
-  | Open _ -> "Open"
-  | Open_on _ -> "Open_on"
-  | Test _ -> "Test"
-  | Get_config -> "Get_config"
-  | Set_config _ -> "Set_config"
-  | Get_rules -> "Get_rules"
-  | Set_rules _ -> "Set_rules"
-  | Status -> "Status"
+(* -- High-level serialization *)
+
+let make_request_envelope : type req resp. (req, resp) command -> req -> int -> string option -> request_envelope =
+  fun cmd params id tenant ->
+  { id; command = command_name cmd; params = serialize_params cmd params; tenant }
+
+let serialize_request_envelope env =
+  request_envelope_to_yojson env |> Yojson.Safe.to_string
+
+let deserialize_request_envelope str =
+  let* json = parse_json_string str in
+  request_envelope_of_yojson json
+
+let make_response_envelope id result =
+  match result with
+  | Ok json -> { id; success = true; payload = json; error = None }
+  | Error msg -> { id; success = false; payload = `Null; error = Some msg }
 
 let serialize_server_message msg =
-  Wire.server_message_to_yojson msg |> Yojson.Safe.to_string
+  server_message_to_yojson msg |> Yojson.Safe.to_string
 
-let deserialize_server_message json =
-  let* json = parse_json_string json in
-  Wire.server_message_of_yojson json
-
-let serialize_request req =
-  Wire.request_to_yojson req |> Yojson.Safe.to_string
-
-let deserialize_request str =
+let deserialize_server_message str =
   let* json = parse_json_string str in
-  Wire.request_of_yojson json
+  server_message_of_yojson json
 
 (* -- Inline expect tests *)
 
 let%expect_test "GADT command round-trip" =
-  let test : type a. a command -> string -> unit =
-    fun cmd label ->
-      match serialize_command_json cmd |> deserialize_command_json with
-      | Ok (Command _) -> printf "%s: ok\n" label
+  let test : type req resp. (req, resp) command -> req -> string -> unit =
+    fun cmd params label ->
+      let env = make_request_envelope cmd params 0 None in
+      match deserialize_request env.command env.params with
+      | Ok (Request _) -> printf "%s: ok\n" label
       | Error e -> printf "%s: FAIL %s\n" label e
   in
-  test (Register (Some "Chrome")) "register";
-  test (Open "https://x.com") "open";
-  test (Open_on ("work", "https://x.com")) "open_on";
-  test Get_config "get_config";
-  test Get_rules "get_rules";
-  test (Set_rules []) "set_rules";
-  test Status "status";
+  test Register { brand = Some "Chrome"; address = None; name = None } "register";
+  test Open { url = "https://x.com" } "open";
+  test Open_on { target = "work"; url = "https://x.com" } "open_on";
+  test Get_config () "get_config";
+  test Get_rules () "get_rules";
+  test Set_rules [] "set_rules";
+  test Status () "status";
   [%expect {|
     register: ok
     open: ok

@@ -16,16 +16,23 @@ let send_message (msg : Yojson.Safe.t)
          | json -> on_response (Ok json)
          | exception _ -> on_response (Error "invalid JSON response")))
 
-let send_protocol_command (cmd : Protocol.Wire.command)
-    ~(on_response : (Protocol.Wire.response, string) Result.t -> unit) : unit =
-  let msg = `Assoc [ ("cmd", Protocol.Wire.command_to_yojson cmd) ] in
-  send_message msg ~on_response:(fun result ->
-    match result with
-    | Error e -> on_response (Error e)
-    | Ok json ->
-      match Protocol.Wire.response_of_yojson json with
-      | Ok resp -> on_response (Ok resp)
-      | Error msg -> on_response (Error msg))
+let send_protocol_command : type req resp. (req, resp) Protocol.command -> req ->
+    on_response:((resp, string) Result.t -> unit) -> unit =
+  fun cmd params ~on_response ->
+    let msg = `Assoc [
+      ("cmd", `String (Protocol.command_name cmd));
+      ("params", Protocol.serialize_params cmd params);
+    ] in
+    send_message msg ~on_response:(fun result ->
+      match result with
+      | Error e -> on_response (Error e)
+      | Ok json ->
+        match Protocol.response_envelope_of_yojson json with
+        | Error msg -> on_response (Error msg)
+        | Ok env ->
+          match env.success with
+          | true -> on_response (Protocol.deserialize_response cmd env.payload)
+          | false -> on_response (Error (Option.value env.error ~default:"unknown error")))
 
 let storage_get (keys : string list)
     ~(on_result : (string * string) list -> unit) : unit =

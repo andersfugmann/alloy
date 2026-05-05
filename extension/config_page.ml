@@ -267,22 +267,20 @@ and reset_tenant_form () : unit =
 (* -- Rule CRUD -- *)
 
 and fetch_and_render_rules () : unit =
-  Page_util.send_protocol_command Get_rules
+  Page_util.send_protocol_command Get_rules ()
     ~on_response:(fun result ->
       match result with
-      | Ok (Ok_rules r) -> render_rules r
-      | Ok (Err { message }) ->
-        show_msg (Printf.sprintf "Failed to load rules: %s" message) "error"
-      | _ -> show_msg "Failed to load rules" "error")
+      | Ok r -> render_rules r
+      | Error msg ->
+        show_msg (Printf.sprintf "Failed to load rules: %s" msg) "error")
 
 and send_and_refetch_rules (updated : Protocol.rule list) : unit =
-  Page_util.send_protocol_command (Set_rules { rules = updated })
+  Page_util.send_protocol_command Set_rules updated
     ~on_response:(fun result ->
       match result with
-      | Ok Ok_unit -> fetch_and_render_rules ()
-      | Ok (Err { message }) ->
-        show_msg (Printf.sprintf "Error saving rules: %s" message) "error"
-      | _ -> show_msg "Unexpected response" "error")
+      | Ok () -> fetch_and_render_rules ()
+      | Error msg ->
+        show_msg (Printf.sprintf "Error saving rules: %s" msg) "error")
 
 and render_rules (rules : Protocol.rule list) : unit =
   let resolve_label target =
@@ -384,10 +382,10 @@ and save_rule () : unit =
           show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
         | Ok () ->
           let rule : Protocol.rule = { pattern; target; enabled = true } in
-          Page_util.send_protocol_command Get_rules
+          Page_util.send_protocol_command Get_rules ()
             ~on_response:(fun result ->
               match result with
-              | Ok (Ok_rules current) ->
+              | Ok current ->
                 let updated =
                   match !editing_rule_index with
                   | Some idx ->
@@ -404,7 +402,7 @@ and save_rule () : unit =
                 in
                 reset_rule_form ();
                 send_and_refetch_rules updated
-              | _ -> show_msg "Failed to fetch rules" "error")))
+              | Error msg -> show_msg (Printf.sprintf "Failed to fetch rules: %s" msg) "error")))
 
 and reset_rule_form () : unit =
   editing_rule_index := None;
@@ -446,13 +444,10 @@ let read_defaults () : unit =
 let save_config () : unit =
   read_defaults ();
   show_msg "Saving\u{2026}" "";
-  Page_util.send_protocol_command (Set_config { config = !config })
+  Page_util.send_protocol_command Set_config !config
     ~on_response:(fun result ->
       match result with
-      | Ok Ok_unit -> show_msg "Configuration saved." "success"
-      | Ok (Err { message }) ->
-        show_msg (Printf.sprintf "Error: %s" message) "error"
-      | Ok _ -> show_msg "Unexpected response" "error"
+      | Ok () -> show_msg "Configuration saved." "success"
       | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
 
 (* -- Fetch config + status -- *)
@@ -479,36 +474,34 @@ let fetch_config () : unit =
          render_defaults ())
   in
 
-  Page_util.send_protocol_command Get_config
+  Page_util.send_protocol_command Get_config ()
     ~on_response:(fun result ->
       (match result with
-       | Ok (Ok_config cfg) ->
+       | Ok cfg ->
          set_status true;
          config := cfg;
          config_ok := true
-       | Ok (Err _) -> set_status false
-       | _ -> ());
+       | Error _ -> set_status false);
       pending := !pending - 1;
       finish_init ());
 
-  Page_util.send_protocol_command Get_rules
+  Page_util.send_protocol_command Get_rules ()
     ~on_response:(fun result ->
       (match result with
-       | Ok (Ok_rules r) ->
+       | Ok r ->
          fetched_rules := r;
          rules_ok := true
-       | Ok (Err _) -> ()
-       | _ -> ());
+       | Error _ -> ());
       pending := !pending - 1;
       finish_init ());
 
-  Page_util.send_protocol_command Status
+  Page_util.send_protocol_command Status ()
     ~on_response:(fun result ->
       (match result with
-       | Ok (Ok_status info) ->
+       | Ok info ->
          connected_tenants :=
            Set.of_list (module String) info.registered_tenants
-       | _ -> ());
+       | Error _ -> ());
       pending := !pending - 1;
       finish_init ())
 

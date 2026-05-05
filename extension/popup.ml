@@ -31,17 +31,14 @@ let set_footer ?(cls = "") (text : string) : unit =
 
 let send_page_to (tenant : string) : unit =
   Page_util.query_active_tab ~on_result:(fun url tab_id ->
-    Page_util.send_protocol_command (Open_on { target = tenant; url })
+    Page_util.send_protocol_command Open_on { target = tenant; url }
       ~on_response:(fun result ->
         match result with
-        | Ok (Ok_route _) ->
+        | Ok _ ->
           Chrome_api.Tabs.remove tab_id;
           Dom_html.window##close
-        | Ok (Err { message }) ->
-          set_footer ~cls:"error" (Printf.sprintf "Error: %s" message)
-        | Ok _ ->
-          set_footer ~cls:"error" "Unexpected response"
-        | Error msg -> set_footer ~cls:"error" msg))
+        | Error msg ->
+          set_footer ~cls:"error" (Printf.sprintf "Error: %s" msg)))
 
 (* -- Render tenants -- *)
 
@@ -158,18 +155,18 @@ let () =
          |> Option.value ~default:"");
       pending := !pending - 1;
       try_render ());
-    Page_util.send_protocol_command Status
+    Page_util.send_protocol_command Status ()
       ~on_response:(fun result ->
         (match result with
-         | Ok (Ok_status info) -> status_ref := Some info
-         | _ -> ());
+         | Ok info -> status_ref := Some info
+         | Error _ -> ());
         pending := !pending - 1;
         try_render ());
-    Page_util.send_protocol_command Get_config
+    Page_util.send_protocol_command Get_config ()
       ~on_response:(fun result ->
         (match result with
-         | Ok (Ok_config cfg) -> config_ref := Some cfg
-         | _ -> ());
+         | Ok cfg -> config_ref := Some cfg
+         | Error _ -> ());
         pending := !pending - 1;
         try_render ()))
 

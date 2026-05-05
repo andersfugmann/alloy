@@ -4,7 +4,7 @@ open! Stdio
 (* -- CLI argument parsing *)
 
 type cli_mode =
-  | Cli_command of Protocol.packed_command
+  | Cli_command of Protocol.packed_request
   | Bridge
   | Register_stream
 
@@ -66,7 +66,7 @@ let cli_term () =
            & info [] ~docv:"URL" ~doc:"URL to open.")
     in
     Cmd.v (Cmd.info "open" ~doc)
-      Term.(const (fun url -> make_opts (Cli_command (Command (Open url))))
+      Term.(const (fun url -> make_opts (Cli_command (Protocol.pack Open { url })))
             $ url $ host_opt $ port_opt $ name_opt)
   in
   let open_on_cmd =
@@ -81,7 +81,7 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "open-on" ~doc)
       Term.(const (fun target url ->
-              make_opts (Cli_command (Command (Open_on (target, url)))))
+              make_opts (Cli_command (Protocol.pack Open_on { target; url })))
             $ target $ url $ host_opt $ port_opt $ name_opt)
   in
   let test_cmd =
@@ -91,13 +91,13 @@ let cli_term () =
            & info [] ~docv:"URL" ~doc:"URL to test.")
     in
     Cmd.v (Cmd.info "test" ~doc)
-      Term.(const (fun url -> make_opts (Cli_command (Command (Test url))))
+      Term.(const (fun url -> make_opts (Cli_command (Protocol.pack Test { url })))
             $ url $ host_opt $ port_opt $ name_opt)
   in
   let get_config_cmd =
     let doc = "Get the current daemon configuration." in
     Cmd.v (Cmd.info "get-config" ~doc)
-      Term.(const (make_opts (Cli_command (Command Get_config)))
+      Term.(const (make_opts (Cli_command (Protocol.pack Get_config ())))
             $ host_opt $ port_opt $ name_opt)
   in
   let set_config_cmd =
@@ -108,13 +108,13 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "set-config" ~doc)
       Term.(const (fun json_file ->
-              make_opts (Cli_command (Command (Set_config (parse_config_file json_file)))))
+              make_opts (Cli_command (Protocol.pack Set_config (parse_config_file json_file))))
             $ json_file $ host_opt $ port_opt $ name_opt)
   in
   let get_rules_cmd =
     let doc = "Get the current routing rules." in
     Cmd.v (Cmd.info "get-rules" ~doc)
-      Term.(const (make_opts (Cli_command (Command Get_rules)))
+      Term.(const (make_opts (Cli_command (Protocol.pack Get_rules ())))
             $ host_opt $ port_opt $ name_opt)
   in
   let set_rules_cmd =
@@ -125,13 +125,13 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "set-rules" ~doc)
       Term.(const (fun json_file ->
-              make_opts (Cli_command (Command (Set_rules (parse_rules_file json_file)))))
+              make_opts (Cli_command (Protocol.pack Set_rules (parse_rules_file json_file))))
             $ json_file $ host_opt $ port_opt $ name_opt)
   in
   let status_cmd =
     let doc = "Show daemon status." in
     Cmd.v (Cmd.info "status" ~doc)
-      Term.(const (make_opts (Cli_command (Command Status)))
+      Term.(const (make_opts (Cli_command (Protocol.pack Status ())))
             $ host_opt $ port_opt $ name_opt)
   in
   Cmd.group (Cmd.info "alloy" ~doc:"Alloy URL routing client")
@@ -151,21 +151,21 @@ let format_test_result = function
   | Protocol.No_match { default_tenant } ->
     Printf.sprintf "No match: default=%s" default_tenant
 
-let format_response : type a. a Protocol.command -> (a, string) Result.t -> string = fun cmd resp ->
+let format_response : type req resp. (req, resp) Protocol.command -> (resp, string) Result.t -> string = fun cmd resp ->
   match resp with
   | Error msg -> Printf.sprintf "Error: %s" msg
   | Ok value ->
     begin match cmd with
-    | Protocol.Register _ -> Printf.sprintf "Registered as %s" value
-    | Protocol.Open _ -> format_route_result value
-    | Protocol.Open_on _ -> format_route_result value
-    | Protocol.Test _ -> format_test_result value
+    | Protocol.Register -> Printf.sprintf "Registered as %s" value
+    | Protocol.Open -> format_route_result value
+    | Protocol.Open_on -> format_route_result value
+    | Protocol.Test -> format_test_result value
     | Protocol.Get_config ->
       Yojson.Safe.pretty_to_string (Protocol.config_to_yojson value)
-    | Protocol.Set_config _ -> "OK"
+    | Protocol.Set_config -> "OK"
     | Protocol.Get_rules ->
       Yojson.Safe.pretty_to_string (Protocol.rules_to_yojson value)
-    | Protocol.Set_rules _ -> "OK"
+    | Protocol.Set_rules -> "OK"
     | Protocol.Status ->
       Printf.sprintf "Tenants: %s\nUptime: %ds"
         (String.concat ~sep:", " value.registered_tenants)
@@ -188,24 +188,26 @@ let connect_to_daemon ~sw net ~host ~port =
 (* -- Send a command to the daemon and get a response (CLI) *)
 
 let send_command_cli :
-    type a.
+    type req resp.
     net:_ Eio.Net.ty Eio.Resource.t ->
     tenant:string ->
     host:string ->
     port:int ->
-    a Protocol.command ->
+    (req, resp) Protocol.command ->
+    req ->
     string =
- fun ~net ~tenant ~host ~port cmd ->
+ fun ~net ~tenant ~host ~port cmd params ->
   Eio.Switch.run @@ fun sw ->
   let flow = connect_to_daemon ~sw net ~host ~port in
-  let wire_cmd = Protocol.command_to_wire cmd in
-  let req : Protocol.Wire.request = { id = 1; command = wire_cmd; tenant = Some tenant } in
-  Eio.Flow.copy_string (Protocol.serialize_request req ^ "\n") flow;
+  let env = Protocol.make_request_envelope cmd params 1 (Some tenant) in
+  Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
   let response_line = Eio.Buf_read.line reader in
   match Protocol.deserialize_server_message response_line with
-  | Ok (Response { id = _; response }) ->
-    format_response cmd (Protocol.response_of_wire cmd response)
+  | Ok (Response resp_env) ->
+    (match resp_env.success with
+     | true -> format_response cmd (Protocol.deserialize_response cmd resp_env.payload)
+     | false -> Printf.sprintf "Error: %s" (Option.value resp_env.error ~default:"unknown"))
   | Ok (Push _) -> "Unexpected push message"
   | Error msg -> Printf.sprintf "Response parse error: %s" msg
 
@@ -216,16 +218,17 @@ let run_register ~net ~host ~port ~tenant =
   let flow =
     connect_to_daemon ~sw net ~host ~port
   in
-  let req : Protocol.Wire.request = { id = 1; command = Register { brand = None; address = None; name = None }; tenant = Some tenant } in
-  Eio.Flow.copy_string (Protocol.serialize_request req ^ "\n") flow;
+  let env = Protocol.make_request_envelope Register { brand = None; address = None; name = None } 1 (Some tenant) in
+  Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
   let first_line = Eio.Buf_read.line reader in
   (match Protocol.deserialize_server_message first_line with
-   | Ok (Response { id = _; response = Ok_registered { tenant_id } }) ->
-     printf "Registered as %s\n%!" tenant_id
-   | Ok (Response { id = _; response = Err { message } }) ->
-     eprintf "Registration failed: %s\n%!" message;
-     Stdlib.exit 1
+   | Ok (Response resp_env) ->
+     (match resp_env.success with
+      | true -> printf "Registered as %s\n%!" tenant
+      | false ->
+        eprintf "Registration failed: %s\n%!" (Option.value resp_env.error ~default:"unknown");
+        Stdlib.exit 1)
    | _ ->
      eprintf "Unexpected registration response\n%!";
      Stdlib.exit 1);
@@ -292,24 +295,37 @@ let run_bridge env =
   (* Wait for a valid Register request; reject anything else *)
   let err_not_registered id =
     Protocol.serialize_server_message
-      (Response { id; response = Err { message = "Not connected. Send Register first" } })
+      (Response (Protocol.make_response_envelope id (Error "Not connected. Send Register first")))
   in
   let rec await_register () =
     match read_native_message stdin_flow with
     | None -> None
     | Some json ->
-      (match Protocol.Wire.request_of_yojson json with
-       | Ok { command = Register { brand; address; name }; _ } ->
-         let tenant = Option.value name ~default:default_tenant in
-         let patched : Protocol.Wire.request = {
-           id = 0;
-           command = Register { brand; address = None; name = Some tenant };
-           tenant = Some tenant;
-         } in
-         Some (tenant, address, Protocol.serialize_request patched)
-       | Ok { id; _ } ->
-         Eio.Stream.add stdout_stream (err_not_registered id);
-         await_register ()
+      (match Protocol.request_envelope_of_yojson json with
+       | Ok env ->
+         (match String.equal env.command "register" with
+          | true ->
+            let name =
+              match Protocol.register_params_of_yojson env.params with
+              | Ok p -> p.name
+              | Error _ -> None
+            in
+            let address =
+              match Protocol.register_params_of_yojson env.params with
+              | Ok p -> p.address
+              | Error _ -> None
+            in
+            let tenant = Option.value name ~default:default_tenant in
+            let patched_params : Protocol.register_params = {
+              brand = (match Protocol.register_params_of_yojson env.params with Ok p -> p.brand | Error _ -> None);
+              address = None;
+              name = Some tenant;
+            } in
+            let patched_env = Protocol.make_request_envelope Register patched_params 0 (Some tenant) in
+            Some (tenant, address, Protocol.serialize_request_envelope patched_env)
+          | false ->
+            Eio.Stream.add stdout_stream (err_not_registered env.id);
+            await_register ())
        | Error _ ->
          Eio.Stream.add stdout_stream (err_not_registered 0);
          await_register ())
@@ -344,11 +360,12 @@ let run_bridge env =
       (* Read registration response and forward to extension *)
       let first_line = Eio.Buf_read.line reader in
       (match Protocol.deserialize_server_message first_line with
-       | Ok (Response { response = Ok_registered _; _ }) ->
-         Eio.Stream.add stdout_stream first_line
-       | Ok (Response { response = Err { message }; _ }) ->
-         eprintf "Registration failed: %s\n%!" message;
-         failwith message
+       | Ok (Response resp_env) ->
+         (match resp_env.success with
+          | true -> Eio.Stream.add stdout_stream first_line
+          | false ->
+            eprintf "Registration failed: %s\n%!" (Option.value resp_env.error ~default:"unknown");
+            failwith (Option.value resp_env.error ~default:"registration failed"))
        | _ ->
          eprintf "Unexpected registration response\n%!";
          failwith "unexpected registration response");
@@ -387,9 +404,9 @@ let run_cli { mode; host; port; name } =
   | Bridge -> run_bridge env
   | Register_stream ->
     run_register ~net ~host ~port ~tenant:(resolve_tenant (Unix.gethostname ()))
-  | Cli_command (Command cmd) ->
+  | Cli_command (Request (cmd, params, _)) ->
     let tenant = resolve_tenant "default" in
-    let output = send_command_cli ~net ~tenant ~host ~port cmd in
+    let output = send_command_cli ~net ~tenant ~host ~port cmd params in
     print_endline output
 
 let () =

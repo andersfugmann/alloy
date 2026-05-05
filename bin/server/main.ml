@@ -36,8 +36,8 @@ type state = {
 
 type coordinator_action =
   | Dispatch of {
-      command : Protocol.packed_command;
-      reply : Protocol.Wire.response Eio.Promise.u;
+      request : Protocol.packed_request;
+      reply : (Yojson.Safe.t, string) Result.t Eio.Promise.u;
       push_stream : string Eio.Stream.t;
     }
   | Unregister
@@ -187,7 +187,7 @@ let launch_browser cmd =
 let deliver_url state target url ~sw ~clock ~inbox =
   match Map.find state.registry target with
   | Some stream ->
-    let push_msg = Protocol.Wire.Push { id = 0; push = Navigate { url } } in
+    let push_msg = Protocol.Push { id = 0; push = Navigate { url } } in
     Eio.Stream.add stream (Protocol.serialize_server_message push_msg);
     (state, Eio.Promise.create_resolved (Ok (Protocol.Remote target)))
   | None ->
@@ -299,8 +299,8 @@ let handle_set_rules state (rules : Protocol.rule list) =
 
 let broadcast_config (state : state) : unit =
   let registered = Map.keys state.registry in
-  let push_wire = Protocol.Wire.Config_updated { config = state.config; registered_tenants = registered } in
-  let msg = Protocol.Wire.Push { id = 0; push = push_wire } in
+  let push = Protocol.Config_updated { config = state.config; registered_tenants = registered } in
+  let msg = Protocol.Push { id = 0; push } in
   let s = Protocol.serialize_server_message msg in
   Map.iter state.registry ~f:(fun stream ->
     Eio.Stream.add stream s)
@@ -310,7 +310,7 @@ let flush_pending_deliveries state tenant push_stream =
   | None -> state
   | Some sentinel ->
     List.iter sentinel.pending ~f:(fun pd ->
-      let push_msg = Protocol.Wire.Push { id = 0; push = Navigate { url = pd.url } } in
+      let push_msg = Protocol.Push { id = 0; push = Navigate { url = pd.url } } in
       Eio.Stream.add push_stream (Protocol.serialize_server_message push_msg);
       Eio.Promise.resolve pd.reply (Ok (Protocol.Remote tenant));
       log "delivered pending URL to %s: %s" tenant pd.url);
@@ -341,16 +341,13 @@ let update_tenant_config state tenant brand =
   let _ = try_save_config state in
   state
 
-let dispatch_command :
-    type a. state -> tenant:Protocol.tenant_id -> a Protocol.command ->
-    reply:Protocol.Wire.response Eio.Promise.u ->
-    push_stream:string Eio.Stream.t ->
-    sw:Eio.Switch.t -> clock:_ Eio.Time.clock ->
-    inbox:coordinator_msg Eio.Stream.t -> state =
- fun state ~tenant cmd ~reply ~push_stream ~sw ~clock ~inbox ->
-  let resolve resp = Eio.Promise.resolve reply (Protocol.response_to_wire cmd resp) in
+let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json))
+    ~reply ~push_stream ~sw ~clock ~inbox =
+  let resolve result =
+    Eio.Promise.resolve reply (Result.map result ~f:resp_to_json)
+  in
   match cmd with
-  | Protocol.Register brand ->
+  | Protocol.Register ->
     let is_reregister = Map.mem state.registry tenant in
     let registry = Map.set state.registry ~key:tenant ~data:push_stream in
     resolve (Ok tenant);
@@ -362,42 +359,42 @@ let dispatch_command :
         state
       | false ->
         log "tenant %s registered (brand=%s)" tenant
-          (Option.value brand ~default:"(none)");
+          (Option.value params.brand ~default:"(none)");
         state
         |> fun s -> flush_pending_deliveries s tenant push_stream
-        |> fun s -> update_tenant_config s tenant brand
+        |> fun s -> update_tenant_config s tenant params.brand
     in
     broadcast_config state;
     state
-  | Protocol.Open url ->
-    let (state, promise) = handle_open state tenant url ~sw ~clock ~inbox in
+  | Protocol.Open ->
+    let (state, promise) = handle_open state tenant params.url ~sw ~clock ~inbox in
     Eio.Fiber.fork ~sw (fun () ->
       let result = Eio.Promise.await promise in
       resolve result);
     state
-  | Protocol.Open_on (target, url) ->
-    let (state, promise) = handle_open_on state target url ~sw ~clock ~inbox in
+  | Protocol.Open_on ->
+    let (state, promise) = handle_open_on state params.target params.url ~sw ~clock ~inbox in
     Eio.Fiber.fork ~sw (fun () ->
       let result = Eio.Promise.await promise in
       resolve result);
     state
-  | Protocol.Test url ->
-    let (state, resp) = handle_test state url in
+  | Protocol.Test ->
+    let (state, resp) = handle_test state params.url in
     resolve resp;
     state
   | Protocol.Get_config ->
     resolve (Ok state.config);
     state
-  | Protocol.Set_config cfg ->
-    let (state, resp) = handle_set_config state cfg in
+  | Protocol.Set_config ->
+    let (state, resp) = handle_set_config state params in
     resolve resp;
     Result.iter resp ~f:(fun () -> broadcast_config state);
     state
   | Protocol.Get_rules ->
     resolve (Ok state.rules);
     state
-  | Protocol.Set_rules rules ->
-    let (state, resp) = handle_set_rules state rules in
+  | Protocol.Set_rules ->
+    let (state, resp) = handle_set_rules state params in
     resolve resp;
     state
   | Protocol.Status ->
@@ -410,8 +407,8 @@ let dispatch_command :
 let rec coordinator_loop state inbox ~sw ~clock =
   let { tenant; action } = Eio.Stream.take inbox in
   let state = match action with
-    | Dispatch { command = Protocol.Command cmd; reply; push_stream } ->
-      dispatch_command state ~tenant cmd ~reply ~push_stream ~sw ~clock ~inbox
+    | Dispatch { request; reply; push_stream } ->
+      dispatch_command state ~tenant request ~reply ~push_stream ~sw ~clock ~inbox
     | Unregister ->
       let registry = Map.remove state.registry tenant in
       log "tenant %s unregistered" tenant;
@@ -439,33 +436,43 @@ let rec forward_pushes push_stream flow =
   Eio.Flow.copy_string (msg ^ "\n") flow;
   forward_pushes push_stream flow
 
-let serialize_response id response =
-  Protocol.Wire.Response { id; response }
+let serialize_response id result =
+  Protocol.Response (Protocol.make_response_envelope id result)
   |> Protocol.serialize_server_message
 
 let rec receive_requests ~tenant inbox push_stream reader =
   match Eio.Buf_read.line reader with
   | exception _ -> tenant
   | line ->
-    match Protocol.deserialize_request line with
+    match Protocol.deserialize_request_envelope line with
     | Error msg ->
       log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
       receive_requests ~tenant inbox push_stream reader
-    | Ok { id; command; tenant = req_tenant } ->
-      let tenant_name = Option.value (Option.first_some req_tenant tenant) ~default:"anonymous" in
-      log "req[%s]: id=%d %s" tenant_name id (Protocol.name_of_command command);
-      let (promise, reply) = Eio.Promise.create () in
-      Eio.Stream.add inbox { tenant = tenant_name; action = Dispatch { command = Protocol.command_of_wire command; reply; push_stream } };
-      let response = Eio.Promise.await promise in
-      let msg = serialize_response id response in
-      log "res[%s]: %s" tenant_name msg;
-      Eio.Stream.add push_stream msg;
-      let tenant =
-        match response with
-        | Protocol.Wire.Ok_registered { tenant_id } -> Some tenant_id
-        | _ -> tenant
-      in
-      receive_requests ~tenant inbox push_stream reader
+    | Ok env ->
+      let tenant_name = Option.value (Option.first_some env.tenant tenant) ~default:"anonymous" in
+      log "req[%s]: id=%d %s" tenant_name env.id env.command;
+      match Protocol.deserialize_request env.command env.params with
+      | Error msg ->
+        log "req[%s]: command error: %s" tenant_name msg;
+        let msg = serialize_response env.id (Error msg) in
+        Eio.Stream.add push_stream msg;
+        receive_requests ~tenant inbox push_stream reader
+      | Ok request ->
+        let (promise, reply) = Eio.Promise.create () in
+        Eio.Stream.add inbox { tenant = tenant_name; action = Dispatch { request; reply; push_stream } };
+        let result = Eio.Promise.await promise in
+        let msg = serialize_response env.id result in
+        log "res[%s]: %s" tenant_name msg;
+        Eio.Stream.add push_stream msg;
+        let tenant =
+          match result with
+          | Ok _ ->
+            (match String.equal env.command "register" with
+             | true -> Some tenant_name
+             | false -> tenant)
+          | Error _ -> tenant
+        in
+        receive_requests ~tenant inbox push_stream reader
 
 let handle_connection inbox flow =
   let push_stream = Eio.Stream.create 16 in

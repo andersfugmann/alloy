@@ -28,10 +28,10 @@ let () =
 (* -- Fetch tenants from config -- *)
 
 let () =
-  Page_util.send_protocol_command Get_config
+  Page_util.send_protocol_command Get_config ()
     ~on_response:(fun result ->
       match result with
-      | Ok (Ok_config cfg) ->
+      | Ok cfg ->
         (match List.is_empty cfg.tenants with
          | true ->
            Page_util.set_html
@@ -51,7 +51,7 @@ let () =
                  ~selected:false
              in
              Dom.appendChild tenant_select opt))
-      | _ ->
+      | Error _ ->
         Page_util.set_html
           (tenant_select :> Dom_html.element Js.t)
           {|<option value="">Failed to load</option>|})
@@ -84,25 +84,18 @@ let () =
             let new_rule : Protocol.rule =
               { pattern; target = tenant; enabled = true }
             in
-            Page_util.send_protocol_command Get_rules
+            Page_util.send_protocol_command Get_rules ()
               ~on_response:(fun result ->
                 match result with
-                | Ok (Ok_rules existing) ->
+                | Ok existing ->
                   let updated = existing @ [ new_rule ] in
-                  Page_util.send_protocol_command (Set_rules { rules = updated })
+                  Page_util.send_protocol_command Set_rules updated
                     ~on_response:(fun result ->
                       match result with
-                      | Ok Ok_unit -> Dom_html.window##close
-                      | Ok (Err { message }) ->
-                        Page_util.set_text error_div
-                          (Printf.sprintf "Error: %s" message)
-                      | Ok _ ->
-                        Page_util.set_text error_div "Unexpected response"
+                      | Ok () -> Dom_html.window##close
                       | Error msg ->
                         Page_util.set_text error_div
                           (Printf.sprintf "Error: %s" msg))
-                | Ok (Err { message }) ->
+                | Error msg ->
                   Page_util.set_text error_div
-                    (Printf.sprintf "Error fetching rules: %s" message)
-                | _ ->
-                  Page_util.set_text error_div "Failed to fetch current rules"))))
+                    (Printf.sprintf "Error fetching rules: %s" msg)))))

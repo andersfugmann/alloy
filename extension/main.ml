@@ -57,7 +57,7 @@ type event =
 type state = {
   native_port : native_port option;
   next_id : int;
-  pending : (Protocol.Wire.response -> unit) Map.M(Int).t;
+  pending : (Protocol.response_envelope -> unit) Map.M(Int).t;
   tenant_names : (string * string * bool) list;
   self_tenant_id : string option;
   debug_logging : bool;
@@ -95,26 +95,30 @@ let update_badge (connected : bool) : unit =
       "icons/icon48_disconnected.png"
       "icons/icon128_disconnected.png"
 
-let send_request (state : state) (cmd : Protocol.Wire.command)
-    (on_response : Protocol.Wire.response -> unit) : state =
+let send_envelope (state : state) (command : string) (params : Yojson.Safe.t)
+    (on_response : Protocol.response_envelope -> unit) : state =
   match state.native_port with
   | None ->
     log "No native port connected";
     state
   | Some p ->
     let id = state.next_id in
-    let req : Protocol.Wire.request = { id; command = cmd; tenant = None } in
-    log (Printf.sprintf "-> %s id=%d" (Protocol.name_of_command cmd) id);
-    Chrome_api.Port.post_message_json p (json_to_string (Protocol.Wire.request_to_yojson req));
+    let env : Protocol.request_envelope = { id; command; params; tenant = None } in
+    log (Printf.sprintf "-> %s id=%d" command id);
+    Chrome_api.Port.post_message_json p (json_to_string (Protocol.request_envelope_to_yojson env));
     { state with
       next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:on_response }
 
-let send_command (state : state) (cmd : Protocol.packed_command)
-    (on_response : Protocol.Wire.response -> unit) : state =
-  let (Protocol.Command c) = cmd in
-  let wire_cmd = Protocol.command_to_wire c in
-  send_request state wire_cmd on_response
+let send_command : type req resp. state -> (req, resp) Protocol.command -> req ->
+    ((resp, string) Result.t -> unit) -> state =
+  fun state cmd params on_result ->
+    let command = Protocol.command_name cmd in
+    let params_json = Protocol.serialize_params cmd params in
+    send_envelope state command params_json (fun resp_env ->
+      match resp_env.success with
+      | true -> on_result (Protocol.deserialize_response cmd resp_env.payload)
+      | false -> on_result (Error (Option.value resp_env.error ~default:"unknown error")))
 
 (* -- Connection management *)
 
@@ -137,13 +141,10 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     (Option.value address ~default:"(default)"));
   let state = { native_port = Some port; next_id = 1; pending = Map.empty (module Int); tenant_names = []; self_tenant_id = None; debug_logging } in
   (* Register uses id=0: response handled by id=0 handler, not pending map *)
-  let register_req : Protocol.Wire.request = {
-    id = 0;
-    command = Register { brand; address; name };
-    tenant = name;
-  } in
+  let register_params : Protocol.register_params = { brand; address; name } in
+  let register_env = Protocol.make_request_envelope Register register_params 0 name in
   log "→ Register id=0";
-  Chrome_api.Port.post_message_json port (json_to_string (Protocol.Wire.request_to_yojson register_req));
+  Chrome_api.Port.post_message_json port (json_to_string (Protocol.request_envelope_to_yojson register_env));
   state
 
 let connect (_state : state) : state =
@@ -179,18 +180,7 @@ let connect (_state : state) : state =
 
 (* -- Event handlers (pure state transformers) *)
 
-let response_type_name (resp : Protocol.Wire.response) : string =
-  match resp with
-  | Ok_registered _ -> "Ok_registered"
-  | Ok_route _ -> "Ok_route"
-  | Ok_test _ -> "Ok_test"
-  | Ok_config _ -> "Ok_config"
-  | Ok_rules _ -> "Ok_rules"
-  | Ok_status _ -> "Ok_status"
-  | Ok_unit -> "Ok_unit"
-  | Err _ -> "Err"
-
-let handle_push (state : state) (p : Protocol.Wire.push) : state =
+let handle_push (state : state) (p : Protocol.push) : state =
   match p with
   | Navigate { url } ->
     log (Printf.sprintf "Received NAVIGATE push: %s" url);
@@ -215,34 +205,38 @@ let handle_bridge_message (state : state) (raw : string) : state =
     log (Printf.sprintf "Failed to parse bridge JSON: %s" msg);
     state
   | Ok json ->
-    (match Protocol.Wire.server_message_of_yojson json with
+    (match Protocol.server_message_of_yojson json with
      | Ok (Push { id = _; push = p }) ->
        handle_push state p
-     | Ok (Response { id = 0; response }) ->
-       (* id=0: registration response *)
-       (match response with
-        | Ok_registered { tenant_id } ->
-          log (Printf.sprintf "← Registered id=0: %s" tenant_id);
-          push (Self_registered { tenant_id });
-          state
-        | Err { message } ->
-          log (Printf.sprintf "← Registration error id=0: %s" message);
-          (* Registration failed — disconnect and schedule reconnect *)
-          push Port_disconnected;
-          { state with native_port = None; pending = Map.empty (module Int) }
-        | other ->
-          log (Printf.sprintf "← Unexpected id=0 response: %s" (response_type_name other));
-          state)
-     | Ok (Response { id; response }) ->
-       log (Printf.sprintf "← %s id=%d (pending: %d)"
-         (response_type_name response) id (Map.length state.pending));
-       (match Map.find state.pending id with
-        | None ->
-          log (Printf.sprintf "Orphan response for id=%d" id);
-          state
-        | Some cb ->
-          cb response;
-          { state with pending = Map.remove state.pending id })
+     | Ok (Response resp_env) ->
+       (match resp_env.id with
+        | 0 ->
+          (* id=0: registration response *)
+          (match resp_env.success with
+           | true ->
+             let tenant_id =
+               match resp_env.payload with
+               | `String s -> s
+               | _ -> "unknown"
+             in
+             log (Printf.sprintf "← Registered id=0: %s" tenant_id);
+             push (Self_registered { tenant_id });
+             state
+           | false ->
+             log (Printf.sprintf "← Registration error id=0: %s"
+               (Option.value resp_env.error ~default:"unknown"));
+             push Port_disconnected;
+             { state with native_port = None; pending = Map.empty (module Int) })
+        | id ->
+          log (Printf.sprintf "← Response id=%d success=%b (pending: %d)"
+            id resp_env.success (Map.length state.pending));
+          (match Map.find state.pending id with
+           | None ->
+             log (Printf.sprintf "Orphan response for id=%d" id);
+             state
+           | Some cb ->
+             cb resp_env;
+             { state with pending = Map.remove state.pending id }))
      | Error msg ->
        log (Printf.sprintf "Failed to parse bridge message: %s" msg);
        state)
@@ -256,16 +250,15 @@ let handle_navigation (state : state) (url : string) (tab_id : int) : state =
      | false ->
        let t0 = Chrome_api.performance_now () in
        debug state (Printf.sprintf "→ Open %s" url);
-       send_command state (Command (Open url)) (fun wire_resp ->
+       send_command state Open { url } (fun result ->
            let elapsed = Chrome_api.performance_now () -. t0 in
-           match wire_resp with
-           | Protocol.Wire.Ok_route Local ->
+           match result with
+           | Ok Protocol.Local ->
              debug state (Printf.sprintf "← Local (%.1f ms) %s" elapsed url)
-           | Ok_route (Remote tid) ->
+           | Ok (Remote tid) ->
              debug state (Printf.sprintf "← Remote %s (%.1f ms) %s" tid elapsed url);
              Chrome_api.Tabs.remove tab_id
-           | Err { message } -> log (Printf.sprintf "Open error: %s" message)
-           | _ -> log "Unexpected response for Open"))
+           | Error msg -> log (Printf.sprintf "Open error: %s" msg)))
 
 let handle_context_menu (state : state) (menu_id : string)
     (link_url : string) (page_url : string) (tab_id : int option) : state =
@@ -274,14 +267,14 @@ let handle_context_menu (state : state) (menu_id : string)
     (match String.is_empty link_url with
      | true -> state
      | false ->
-       send_command state (Command (Open_on (target, link_url)))
-         (fun _resp -> ()))
+       send_command state Open_on { target; url = link_url }
+         (fun _result -> ()))
   | Some ("send_to", target) ->
     (match String.is_empty page_url with
      | true -> state
      | false ->
-       send_command state (Command (Open_on (target, page_url)))
-         (fun _resp -> Option.iter tab_id ~f:Chrome_api.Tabs.remove))
+       send_command state Open_on { target; url = page_url }
+         (fun _result -> Option.iter tab_id ~f:Chrome_api.Tabs.remove))
   | _ ->
   let url =
     match String.is_empty link_url with
@@ -305,15 +298,14 @@ let handle_context_menu (state : state) (menu_id : string)
     (match String.is_empty url with
      | true -> state
      | false ->
-       send_command state (Command (Test url)) (fun wire_resp ->
-           match wire_resp with
-           | Protocol.Wire.Ok_test (Match { rule_index; _ }) ->
+       send_command state Test { url } (fun result ->
+           match result with
+           | Ok (Protocol.Match { rule_index; _ }) ->
              push (Delete_rule_at { index = rule_index })
-           | Ok_test (No_match _) ->
+           | Ok (No_match _) ->
              log (Printf.sprintf "No rule matches %s" url)
-           | Err { message } ->
-             log (Printf.sprintf "Test error: %s" message)
-           | _ -> log "Unexpected response for Test"))
+           | Error msg ->
+             log (Printf.sprintf "Test error: %s" msg)))
   | _ -> state
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
@@ -334,17 +326,15 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
        respond (`Assoc [ ("error", `String "url required") ]);
        state
      | false ->
-       send_command state (Command (Test url)) (fun wire_resp ->
-           match wire_resp with
-           | Protocol.Wire.Ok_test (Match { rule_index; _ }) ->
+       send_command state Test { url } (fun result ->
+           match result with
+           | Ok (Protocol.Match { rule_index; _ }) ->
              push (Delete_rule_at { index = rule_index });
              respond (`Assoc [ ("ok", `Bool true) ])
-           | Ok_test (No_match _) ->
+           | Ok (No_match _) ->
              respond (`Assoc [ ("error", `String "No matching rule") ])
-           | Err { message } ->
-             respond (`Assoc [ ("error", `String message) ])
-           | _ ->
-             respond (`Assoc [ ("error", `String "unexpected response") ])))
+           | Error msg ->
+             respond (`Assoc [ ("error", `String msg) ])))
   | Ok other ->
     log (Printf.sprintf "Unknown popup action: %s" other);
     respond (`Assoc [ ("error", `String "unknown action") ]);
@@ -355,22 +345,22 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
 
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state =
-  (* Protocol command passthrough: {"cmd": <Wire.command>} *)
-  match Yojson.Safe.Util.member "cmd" json with
-  | `Null -> handle_local_action state json respond
-  | cmd_json ->
-    match Protocol.Wire.command_of_yojson cmd_json with
-    | Error msg ->
-      respond (Protocol.Wire.response_to_yojson (Err { message = msg }));
+  (* Protocol command passthrough: {"cmd": "<command>", "params": <json>} *)
+  match string_field json "cmd" with
+  | Error _ -> handle_local_action state json respond
+  | Ok cmd_name ->
+    let params_json =
+      match Yojson.Safe.Util.member "params" json with
+      | `Null -> `Assoc []
+      | p -> p
+    in
+    match is_connected state with
+    | false ->
+      respond (`Assoc [ ("success", `Bool false); ("error", `String "Not connected") ]);
       state
-    | Ok wire_cmd ->
-      match is_connected state with
-      | false ->
-        respond (Protocol.Wire.response_to_yojson (Err { message = "Not connected" }));
-        state
-      | true ->
-        send_request state wire_cmd (fun wire_resp ->
-          respond (Protocol.Wire.response_to_yojson wire_resp))
+    | true ->
+      send_envelope state cmd_name params_json (fun resp_env ->
+        respond (Protocol.response_envelope_to_yojson resp_env))
 
 let setup_context_menus (tenants : (string * string * bool) list) (self_id : string option) : unit =
   remove_all_context_menus (fun () ->
@@ -395,23 +385,19 @@ let setup_context_menus (tenants : (string * string * bool) list) (self_id : str
     create_context_menu ~id:"delete_rule" ~title:"Delete matching rule" ~contexts:[ "page"; "link" ])
 
 let handle_delete_rule_at (state : state) (index : int) : state =
-  send_command state (Command Get_rules) (fun wire_resp ->
-      match wire_resp with
-      | Protocol.Wire.Ok_rules existing ->
+  send_command state Get_rules () (fun result ->
+      match result with
+      | Ok existing ->
         let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i index)) in
-        send_command state (Command (Set_rules updated)) (fun wire_resp ->
-            match wire_resp with
-            | Protocol.Wire.Ok_unit ->
+        send_command state Set_rules updated (fun result ->
+            match result with
+            | Ok () ->
               log (Printf.sprintf "Deleted rule at index %d" index)
-            | Err { message } ->
-              log (Printf.sprintf "Delete rule error: %s" message)
-            | _ ->
-              log "Unexpected response for Set_rules")
+            | Error msg ->
+              log (Printf.sprintf "Delete rule error: %s" msg))
         |> ignore
-      | Err { message } ->
-        log (Printf.sprintf "Failed to fetch rules: %s" message)
-      | _ ->
-        log "Unexpected response for Get_rules")
+      | Error msg ->
+        log (Printf.sprintf "Failed to fetch rules: %s" msg))
 
 let handle_event (state : state) (event : event) : state =
   match event with
