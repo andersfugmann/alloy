@@ -113,6 +113,26 @@ let load_rules config_path =
     Result.bind (Protocol.parse_json_string content) ~f:Protocol.rules_of_yojson
   | false -> Ok []
 
+let migrate_rules_from_config config_path json =
+  let rules_json = Yojson.Safe.Util.member "rules" json in
+  match rules_json with
+  | `Null -> ()
+  | rules_json ->
+    match Protocol.rules_of_yojson rules_json with
+    | Ok rules ->
+      log "found rules in config.json, migrating to rules.json";
+      save_rules config_path rules;
+      let stripped =
+        match json with
+        | `Assoc fields ->
+          `Assoc (List.filter fields ~f:(fun (k, _) -> not (String.equal k "rules")))
+        | other -> other
+      in
+      let content = Yojson.Safe.pretty_to_string stripped in
+      Out_channel.write_all config_path ~data:(content ^ "\n")
+    | Error msg ->
+      log "warning: could not parse rules from config: %s" msg
+
 let load_config path =
   match Stdlib.Sys.file_exists path with
   | true ->
@@ -120,25 +140,7 @@ let load_config path =
     Result.bind (Protocol.parse_json_string content) ~f:(fun json ->
       match Protocol.config_of_yojson json with
       | Ok config ->
-        (* Migrate rules out of config if present *)
-        let rules_json = Yojson.Safe.Util.member "rules" json in
-        (match rules_json with
-         | `Null -> ()
-         | rules_json ->
-           (match Protocol.rules_of_yojson rules_json with
-            | Ok rules ->
-              log "found rules in config.json, migrating to rules.json";
-              save_rules path rules;
-              let stripped =
-                match json with
-                | `Assoc fields ->
-                  `Assoc (List.filter fields ~f:(fun (k, _) -> not (String.equal k "rules")))
-                | other -> other
-              in
-              let content = Yojson.Safe.pretty_to_string stripped in
-              Out_channel.write_all path ~data:(content ^ "\n")
-            | Error msg ->
-              log "warning: could not parse rules from config: %s" msg));
+        migrate_rules_from_config path json;
         Ok config
       | Error msg -> Error msg)
   | false ->

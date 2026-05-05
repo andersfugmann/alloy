@@ -53,6 +53,7 @@ type event =
   | Refresh_menus of { tenants : (string * string * bool) list }
   | Self_registered of { tenant_id : string }
   | Delete_rule_at of { index : int }
+  | Apply_set_rules of { rules : Protocol.rule list }
 
 type state = {
   native_port : native_port option;
@@ -100,6 +101,7 @@ let send_envelope (state : state) (command : string) (params : Yojson.Safe.t)
   match state.native_port with
   | None ->
     log "No native port connected";
+    on_response { id = 0; success = false; payload = `Null; error = Some "not connected" };
     state
   | Some p ->
     let id = state.next_id in
@@ -389,13 +391,7 @@ let handle_delete_rule_at (state : state) (index : int) : state =
       match result with
       | Ok existing ->
         let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i index)) in
-        send_command state Set_rules updated (fun result ->
-            match result with
-            | Ok () ->
-              log (Printf.sprintf "Deleted rule at index %d" index)
-            | Error msg ->
-              log (Printf.sprintf "Delete rule error: %s" msg))
-        |> ignore
+        push (Apply_set_rules { rules = updated })
       | Error msg ->
         log (Printf.sprintf "Failed to fetch rules: %s" msg))
 
@@ -424,6 +420,11 @@ let handle_event (state : state) (event : event) : state =
     { state with self_tenant_id = Some tenant_id }
   | Delete_rule_at { index } ->
     handle_delete_rule_at state index
+  | Apply_set_rules { rules } ->
+    send_command state Set_rules rules (fun result ->
+        match result with
+        | Ok () -> log "Set rules succeeded"
+        | Error msg -> log (Printf.sprintf "Set rules error: %s" msg))
 
 (* -- Coordinator loop *)
 

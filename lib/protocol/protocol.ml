@@ -229,9 +229,10 @@ let deserialize_request (name : string) (params : Yojson.Safe.t) : (packed_reque
 let deserialize_response : type req resp. (req, resp) command -> Yojson.Safe.t -> (resp, string) Result.t =
   fun cmd payload -> match cmd with
   | Register ->
-    (match payload with
-     | `String s -> Ok s
-     | _ -> Error "register: expected string")
+    begin match payload with
+    | `String s -> Ok s
+    | _ -> Error "register: expected string"
+    end
   | Open -> route_result_of_yojson payload
   | Open_on -> route_result_of_yojson payload
   | Test -> test_result_of_yojson payload
@@ -279,6 +280,7 @@ let%expect_test "GADT command round-trip" =
   test Register { brand = Some "Chrome"; address = None; name = None } "register";
   test Open { url = "https://x.com" } "open";
   test Open_on { target = "work"; url = "https://x.com" } "open_on";
+  test Test { url = "https://test.com" } "test";
   test Get_config () "get_config";
   test Get_rules () "get_rules";
   test Set_rules [] "set_rules";
@@ -287,16 +289,58 @@ let%expect_test "GADT command round-trip" =
     register: ok
     open: ok
     open_on: ok
+    test: ok
     get_config: ok
     get_rules: ok
     set_rules: ok
     status: ok
     |}]
 
+let%expect_test "response round-trip" =
+  let test : type req resp. (req, resp) command -> resp -> string -> unit =
+    fun cmd resp label ->
+      let json = response_serializer cmd resp in
+      match deserialize_response cmd json with
+      | Ok _ -> printf "%s: ok\n" label
+      | Error e -> printf "%s: FAIL %s\n" label e
+  in
+  test Register "tenant-1" "register";
+  test Open Local "open/local";
+  test Open (Remote "work") "open/remote";
+  test Open_on Local "open_on";
+  test Test (Match { tenant = "work"; rule_index = 0 }) "test/match";
+  test Test (No_match { default_tenant = "default" }) "test/no_match";
+  test Get_config {
+    listen = [{ host = "127.0.0.1"; port = 9100 }];
+    allowed_networks = [];
+    tenants = [("default", { browser_cmd = None; label = "Default"; color = "#000"; brand = None })];
+    defaults = { unmatched = "default"; cooldown_seconds = 2; browser_launch_timeout = 10 };
+  } "get_config";
+  test Set_config () "set_config";
+  test Get_rules [] "get_rules/empty";
+  test Get_rules [{ pattern = ".*\\.example\\.com"; target = "work"; enabled = true }] "get_rules/one";
+  test Set_rules () "set_rules";
+  test Status { registered_tenants = ["t1"]; uptime_seconds = 42 } "status";
+  [%expect {|
+    register: ok
+    open/local: ok
+    open/remote: ok
+    open_on: ok
+    test/match: ok
+    test/no_match: ok
+    get_config: ok
+    set_config: ok
+    get_rules/empty: ok
+    get_rules/one: ok
+    set_rules: ok
+    status: ok
+    |}]
+
 let%expect_test "deserialize: invalid json string" =
-  (match parse_json_string "not valid json{" with
-   | Error msg -> printf "error=%s\n" msg
-   | Ok _ -> print_endline "UNEXPECTED OK");
+  begin match parse_json_string "not valid json{" with
+  | Error msg -> printf "error=%s\n" msg
+  | Ok _ -> print_endline "UNEXPECTED OK"
+  end;
   [%expect {|
     error=invalid JSON: Line 1, bytes 0-15:
     Invalid token 'not valid json{'
