@@ -114,12 +114,12 @@ let send_envelope (state : state) (command : string) (params : Yojson.Safe.t)
 
 let send_command : type req resp. state -> (req, resp) Protocol.command -> req ->
     ((resp, string) Result.t -> unit) -> state =
-  fun state cmd params on_result ->
+  fun state cmd request on_result ->
     let command = Protocol.command_name cmd in
-    let params_json = Protocol.serialize_params cmd params in
-    send_envelope state command params_json (fun resp_env ->
+    let request_json = Protocol.request_serializer cmd request in
+    send_envelope state command request_json (fun resp_env ->
       match resp_env.success with
-      | true -> on_result (Protocol.deserialize_response cmd resp_env.payload)
+      | true -> on_result (Protocol.response_deserializer cmd resp_env.payload)
       | false -> on_result (Error (Option.value resp_env.error ~default:"unknown error")))
 
 (* -- Connection management *)
@@ -143,8 +143,8 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     (Option.value address ~default:"(default)"));
   let state = { native_port = Some port; next_id = 1; pending = Map.empty (module Int); tenant_names = []; self_tenant_id = None; debug_logging } in
   (* Register uses id=0: response handled by id=0 handler, not pending map *)
-  let register_params : Protocol.register_params = { brand; address; name } in
-  let register_env = Protocol.make_request_envelope Register register_params 0 name in
+  let register_request : Protocol.register_request = { brand; address; name } in
+  let register_env = Protocol.make_request_envelope Register register_request 0 name in
   log "→ Register id=0";
   Chrome_api.Port.post_message_json port (json_to_string (Protocol.request_envelope_to_yojson register_env));
   state

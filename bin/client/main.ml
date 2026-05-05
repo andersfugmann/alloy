@@ -189,7 +189,7 @@ let send_command_cli ~net ~tenant ~host ~port (Cli_cmd { cmd; params; format }) 
   | Ok (Response resp_env) ->
     (match resp_env.success with
      | true ->
-       (match Protocol.deserialize_response cmd resp_env.payload with
+       (match Protocol.response_deserializer cmd resp_env.payload with
         | Ok value -> format value
         | Error msg -> Printf.sprintf "Response decode error: %s" msg)
      | false -> Printf.sprintf "Error: %s" (Option.value resp_env.error ~default:"unknown"))
@@ -291,17 +291,17 @@ let run_bridge env =
          (match String.equal env.command "register" with
           | true ->
             let (name, address, brand) =
-              match Protocol.register_params_of_yojson env.params with
+              match Protocol.register_request_of_yojson env.params with
               | Ok p -> (p.name, p.address, p.brand)
               | Error _ -> (None, None, None)
             in
             let tenant = Option.value name ~default:default_tenant in
-            let patched_params : Protocol.register_params = {
+            let patched_request : Protocol.register_request = {
               brand;
               address = None;
               name = Some tenant;
             } in
-            let patched_env = Protocol.make_request_envelope Register patched_params 0 (Some tenant) in
+            let patched_env = Protocol.make_request_envelope Register patched_request 0 (Some tenant) in
             Some (tenant, address, Protocol.serialize_request_envelope patched_env)
           | false ->
             Eio.Stream.add stdout_stream (err_not_registered env.id);

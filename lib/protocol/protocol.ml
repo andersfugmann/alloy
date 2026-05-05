@@ -82,25 +82,25 @@ type test_result =
   | No_match of { default_tenant : tenant_id }
 [@@deriving yojson]
 
-(* -- Request parameter types *)
+(* -- Request types *)
 
-type register_params = {
+type register_request = {
   brand : string option; [@default None]
   address : string option; [@default None]
   name : string option; [@default None]
 }
 [@@deriving yojson]
 
-type open_params = { url : string } [@@deriving yojson]
-type open_on_params = { target : string; url : string } [@@deriving yojson]
+type open_request = { url : string } [@@deriving yojson]
+type open_on_request = { target : string; url : string } [@@deriving yojson]
 
 (* -- GADT command type *)
 
 type (_, _) command =
-  | Register : (register_params, string) command
-  | Open : (open_params, route_result) command
-  | Open_on : (open_on_params, route_result) command
-  | Test : (open_params, test_result) command
+  | Register : (register_request, string) command
+  | Open : (open_request, route_result) command
+  | Open_on : (open_on_request, route_result) command
+  | Test : (open_request, test_result) command
   | Get_config : (unit, config) command
   | Set_config : (config, unit) command
   | Get_rules : (unit, rule list) command
@@ -166,39 +166,36 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Set_rules -> "set_rules"
   | Status -> "status"
 
-let serialize_params : type req resp. (req, resp) command -> req -> Yojson.Safe.t =
-  fun cmd params -> match cmd with
-  | Register -> register_params_to_yojson params
-  | Open -> open_params_to_yojson params
-  | Open_on -> open_on_params_to_yojson params
-  | Test -> open_params_to_yojson params
-  | Get_config -> `Null
-  | Set_config -> config_to_yojson params
-  | Get_rules -> `Null
-  | Set_rules -> rules_to_yojson params
-  | Status -> `Null
+let request_serializer : type req resp. (req, resp) command -> (req -> Yojson.Safe.t) = function
+  | Register -> register_request_to_yojson
+  | Open -> open_request_to_yojson
+  | Open_on -> open_on_request_to_yojson
+  | Test -> open_request_to_yojson
+  | Get_config -> (fun () -> `Null)
+  | Set_config -> config_to_yojson
+  | Get_rules -> (fun () -> `Null)
+  | Set_rules -> rules_to_yojson
+  | Status -> (fun () -> `Null)
 
-let deserialize_response : type req resp. (req, resp) command -> Yojson.Safe.t -> (resp, string) Result.t =
-  fun cmd payload -> match cmd with
+let response_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (resp, string) Result.t) = function
   | Register ->
-    begin match payload with
-    | `String s -> Ok s
-    | _ -> Error "register: expected string"
-    end
-  | Open -> route_result_of_yojson payload
-  | Open_on -> route_result_of_yojson payload
-  | Test -> test_result_of_yojson payload
-  | Get_config -> config_of_yojson payload
-  | Set_config -> Ok ()
-  | Get_rules -> rules_of_yojson payload
-  | Set_rules -> Ok ()
-  | Status -> status_info_of_yojson payload
+    (fun payload -> match payload with
+     | `String s -> Ok s
+     | _ -> Error "register: expected string")
+  | Open -> route_result_of_yojson
+  | Open_on -> route_result_of_yojson
+  | Test -> test_result_of_yojson
+  | Get_config -> config_of_yojson
+  | Set_config -> (fun _ -> Ok ())
+  | Get_rules -> rules_of_yojson
+  | Set_rules -> (fun _ -> Ok ())
+  | Status -> status_info_of_yojson
 
 (* -- High-level serialization *)
 
 let make_request_envelope : type req resp. (req, resp) command -> req -> int -> string option -> request_envelope =
-  fun cmd params id tenant ->
-  { id; command = command_name cmd; params = serialize_params cmd params; tenant }
+  fun cmd request id tenant ->
+  { id; command = command_name cmd; params = request_serializer cmd request; tenant }
 
 let serialize_request_envelope env =
   request_envelope_to_yojson env |> Yojson.Safe.to_string
@@ -253,7 +250,7 @@ let%expect_test "request envelope round-trip" =
     |}]
 
 (* Test helper: serialize a response for a command *)
-let serialize_response_payload : type req resp. (req, resp) command -> resp -> Yojson.Safe.t = function
+let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
   | Register -> (fun s -> `String s)
   | Open -> route_result_to_yojson
   | Open_on -> route_result_to_yojson
@@ -267,8 +264,8 @@ let serialize_response_payload : type req resp. (req, resp) command -> resp -> Y
 let%expect_test "response round-trip" =
   let test : type req resp. (req, resp) command -> resp -> string -> unit =
     fun cmd resp label ->
-      let json = serialize_response_payload cmd resp in
-      match deserialize_response cmd json with
+      let json = response_serializer cmd resp in
+      match response_deserializer cmd json with
       | Ok _ -> printf "%s: ok\n" label
       | Error e -> printf "%s: FAIL %s\n" label e
   in

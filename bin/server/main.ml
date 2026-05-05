@@ -400,21 +400,21 @@ let handle_register params env ~resolve =
   |> fun s -> update_tenant_config s env.tenant params.brand
   |> broadcast_config
 
-let handle_open_cmd (params : Protocol.open_params) env ~resolve =
+let handle_open_cmd (params : Protocol.open_request) env ~resolve =
   let (state, promise) = handle_open env.state env.tenant params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
     resolve result);
   state
 
-let handle_open_on_cmd (params : Protocol.open_on_params) env ~resolve =
-  let (state, promise) = handle_open_on env.state params.target params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+let handle_open_on_cmd params env ~resolve =
+  let (state, promise) = handle_open_on env.state params.Protocol.target params.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
     resolve result);
   state
 
-let handle_test_cmd (params : Protocol.open_params) env ~resolve =
+let handle_test_cmd (params : Protocol.open_request) env ~resolve =
   let (state, resp) = handle_test env.state params.Protocol.url in
   resolve resp;
   state
@@ -449,25 +449,25 @@ let handle_status_cmd _params env ~resolve =
 let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "register" -> Ok (Handler {
       cmd = Register;
-      deserialize = Protocol.register_params_of_yojson;
+      deserialize = Protocol.register_request_of_yojson;
       serialize = (fun s -> `String s);
       handle = handle_register;
     })
   | "open" -> Ok (Handler {
       cmd = Open;
-      deserialize = Protocol.open_params_of_yojson;
+      deserialize = Protocol.open_request_of_yojson;
       serialize = Protocol.route_result_to_yojson;
       handle = handle_open_cmd;
     })
   | "open_on" -> Ok (Handler {
       cmd = Open_on;
-      deserialize = Protocol.open_on_params_of_yojson;
+      deserialize = Protocol.open_on_request_of_yojson;
       serialize = Protocol.route_result_to_yojson;
       handle = handle_open_on_cmd;
     })
   | "test" -> Ok (Handler {
       cmd = Test;
-      deserialize = Protocol.open_params_of_yojson;
+      deserialize = Protocol.open_request_of_yojson;
       serialize = Protocol.test_result_to_yojson;
       handle = handle_test_cmd;
     })

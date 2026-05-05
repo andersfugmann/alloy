@@ -21,7 +21,7 @@ let send_protocol_command : type req resp. (req, resp) Protocol.command -> req -
   fun cmd params ~on_response ->
     let msg = `Assoc [
       ("cmd", `String (Protocol.command_name cmd));
-      ("params", Protocol.serialize_params cmd params);
+      ("params", Protocol.request_serializer cmd params);
     ] in
     send_message msg ~on_response:(fun result ->
       match result with
@@ -31,7 +31,7 @@ let send_protocol_command : type req resp. (req, resp) Protocol.command -> req -
         | Error msg -> on_response (Error msg)
         | Ok env ->
           match env.success with
-          | true -> on_response (Protocol.deserialize_response cmd env.payload)
+          | true -> on_response (Protocol.response_deserializer cmd env.payload)
           | false -> on_response (Error (Option.value env.error ~default:"unknown error")))
 
 let storage_get (keys : string list)
