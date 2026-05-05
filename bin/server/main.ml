@@ -57,6 +57,7 @@ type handler_env = {
 
 and packed_handler =
   | Handler : {
+      cmd : ('req, 'resp) Protocol.command;
       deserialize : Yojson.Safe.t -> ('req, string) Result.t;
       serialize : 'resp -> Yojson.Safe.t;
       handle : 'req -> handler_env -> resolve:(('resp, string) Result.t -> unit) -> state;
@@ -447,46 +448,55 @@ let handle_status_cmd _params env ~resolve =
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "register" -> Ok (Handler {
+      cmd = Register;
       deserialize = Protocol.register_params_of_yojson;
       serialize = (fun s -> `String s);
       handle = handle_register;
     })
   | "open" -> Ok (Handler {
+      cmd = Open;
       deserialize = Protocol.open_params_of_yojson;
       serialize = Protocol.route_result_to_yojson;
       handle = handle_open_cmd;
     })
   | "open_on" -> Ok (Handler {
+      cmd = Open_on;
       deserialize = Protocol.open_on_params_of_yojson;
       serialize = Protocol.route_result_to_yojson;
       handle = handle_open_on_cmd;
     })
   | "test" -> Ok (Handler {
+      cmd = Test;
       deserialize = Protocol.open_params_of_yojson;
       serialize = Protocol.test_result_to_yojson;
       handle = handle_test_cmd;
     })
   | "get_config" -> Ok (Handler {
+      cmd = Get_config;
       deserialize = (fun _ -> Ok ());
       serialize = Protocol.config_to_yojson;
       handle = handle_get_config;
     })
   | "set_config" -> Ok (Handler {
+      cmd = Set_config;
       deserialize = Protocol.config_of_yojson;
       serialize = (fun () -> `Null);
       handle = handle_set_config_cmd;
     })
   | "get_rules" -> Ok (Handler {
+      cmd = Get_rules;
       deserialize = (fun _ -> Ok ());
       serialize = Protocol.rules_to_yojson;
       handle = handle_get_rules;
     })
   | "set_rules" -> Ok (Handler {
+      cmd = Set_rules;
       deserialize = Protocol.rules_of_yojson;
       serialize = (fun () -> `Null);
       handle = handle_set_rules_cmd;
     })
   | "status" -> Ok (Handler {
+      cmd = Status;
       deserialize = (fun _ -> Ok ());
       serialize = Protocol.status_info_to_yojson;
       handle = handle_status_cmd;
@@ -495,7 +505,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
 
 (* -- Generic executor: no GADT matching *)
 
-let execute_handler (Handler { deserialize; serialize; handle }) params_json env reply =
+let execute_handler (Handler { cmd = _; deserialize; serialize; handle }) params_json env reply =
   match deserialize params_json with
   | Error msg ->
     Eio.Promise.resolve reply (Error msg);
