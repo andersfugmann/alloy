@@ -19,8 +19,6 @@ let config : Protocol.config ref =
         { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
     }
 
-let rules : Protocol.rule list ref = ref []
-
 let connected_tenants : Set.M(String).t ref =
   ref (Set.empty (module String))
 
@@ -121,7 +119,7 @@ let populate_tenant_selects () : unit =
     Dom.appendChild unmatched_sel opt);
   populate_rule_target (Js.to_string (Page_util.select_by_id "rfTarget")##.value)
 
-(* -- Tenant CRUD (mutually recursive) -- *)
+(* -- Tenant CRUD -- *)
 
 let rec render_tenants () : unit =
   let tenants = !config.tenants in
@@ -221,7 +219,7 @@ and delete_tenant (id : string) : unit =
         List.Assoc.remove !config.tenants ~equal:String.equal id
     };
   render_tenants ();
-  render_rules ();
+  fetch_and_render_rules ();
   populate_tenant_selects ()
 
 and save_tenant () : unit =
@@ -266,32 +264,40 @@ and reset_tenant_form () : unit =
   Page_util.set_text (Page_util.get_by_id "tfSave") "Add tenant";
   Page_util.remove_class tenant_form_el "visible"
 
-(* -- Rule CRUD (mutually recursive) -- *)
+(* -- Rule CRUD -- *)
 
-and send_set_rules () : unit =
-  Page_util.send_protocol_command (Set_rules { rules = !rules })
+and fetch_and_render_rules () : unit =
+  Page_util.send_protocol_command Get_rules
     ~on_response:(fun result ->
       match result with
-      | Ok Ok_unit -> render_rules ()
+      | Ok (Ok_rules r) -> render_rules r
+      | Ok (Err { message }) ->
+        show_msg (Printf.sprintf "Failed to load rules: %s" message) "error"
+      | _ -> show_msg "Failed to load rules" "error")
+
+and send_and_refetch_rules (updated : Protocol.rule list) : unit =
+  Page_util.send_protocol_command (Set_rules { rules = updated })
+    ~on_response:(fun result ->
+      match result with
+      | Ok Ok_unit -> fetch_and_render_rules ()
       | Ok (Err { message }) ->
         show_msg (Printf.sprintf "Error saving rules: %s" message) "error"
       | _ -> show_msg "Unexpected response" "error")
 
-and render_rules () : unit =
-  let current_rules = !rules in
+and render_rules (rules : Protocol.rule list) : unit =
   let resolve_label target =
     match List.Assoc.find !config.tenants ~equal:String.equal target with
     | Some tc ->
       (match String.is_empty tc.label with true -> target | false -> tc.label)
     | None -> target
   in
-  match List.is_empty current_rules with
+  match List.is_empty rules with
   | true ->
     Page_util.set_html rule_list_el
       {|<div class="card-empty">No routing rules configured.</div>|}
   | false ->
     let html =
-      List.mapi current_rules ~f:(fun i r ->
+      List.mapi rules ~f:(fun i r ->
         let on_class = match r.enabled with true -> "on" | false -> "" in
         Printf.sprintf
           {|<div class="row-item rule-row">
@@ -317,22 +323,24 @@ and render_rules () : unit =
       ~selector:"[data-toggle-rule]" ~attr:"data-toggle-rule"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        rules :=
-          List.mapi !rules ~f:(fun i r ->
+        let updated =
+          List.mapi rules ~f:(fun i r ->
             match Int.equal i idx with
             | true -> { r with enabled = not r.enabled }
-            | false -> r);
-        send_set_rules ());
+            | false -> r)
+        in
+        send_and_refetch_rules updated);
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-edit-rule]" ~attr:"data-edit-rule"
-      ~f:(fun idx_s -> edit_rule (Int.of_string idx_s));
+      ~f:(fun idx_s -> edit_rule rules (Int.of_string idx_s));
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-del-rule]" ~attr:"data-del-rule"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        rules :=
-          List.filteri !rules ~f:(fun i _ -> not (Int.equal i idx));
-        send_set_rules ());
+        let updated =
+          List.filteri rules ~f:(fun i _ -> not (Int.equal i idx))
+        in
+        send_and_refetch_rules updated);
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-move-rule-up]" ~attr:"data-move-rule-up"
       ~f:(fun idx_s ->
@@ -340,20 +348,18 @@ and render_rules () : unit =
         (match idx > 0 with
          | false -> ()
          | true ->
-           rules := swap_nth (idx - 1) !rules;
-           send_set_rules ()));
+           send_and_refetch_rules (swap_nth (idx - 1) rules)));
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-move-rule-down]" ~attr:"data-move-rule-down"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        (match idx < List.length !rules - 1 with
+        (match idx < List.length rules - 1 with
          | false -> ()
          | true ->
-           rules := swap_nth idx !rules;
-           send_set_rules ()))
+           send_and_refetch_rules (swap_nth idx rules)))
 
-and edit_rule (idx : int) : unit =
-  match List.nth !rules idx with
+and edit_rule (rules : Protocol.rule list) (idx : int) : unit =
+  match List.nth rules idx with
   | None -> ()
   | Some r ->
     editing_rule_index := Some idx;
@@ -378,22 +384,27 @@ and save_rule () : unit =
           show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
         | Ok () ->
           let rule : Protocol.rule = { pattern; target; enabled = true } in
-          (match !editing_rule_index with
-           | Some idx ->
-             let prev_enabled =
-               match List.nth !rules idx with
-               | Some r -> r.enabled
-               | None -> true
-             in
-             rules :=
-               List.mapi !rules ~f:(fun i r ->
-                 match Int.equal i idx with
-                 | true -> { rule with enabled = prev_enabled }
-                 | false -> r)
-           | None ->
-             rules := !rules @ [ rule ]);
-          reset_rule_form ();
-          send_set_rules ()))
+          Page_util.send_protocol_command Get_rules
+            ~on_response:(fun result ->
+              match result with
+              | Ok (Ok_rules current) ->
+                let updated =
+                  match !editing_rule_index with
+                  | Some idx ->
+                    let prev_enabled =
+                      match List.nth current idx with
+                      | Some r -> r.enabled
+                      | None -> true
+                    in
+                    List.mapi current ~f:(fun i r ->
+                      match Int.equal i idx with
+                      | true -> { rule with enabled = prev_enabled }
+                      | false -> r)
+                  | None -> current @ [ rule ]
+                in
+                reset_rule_form ();
+                send_and_refetch_rules updated
+              | _ -> show_msg "Failed to fetch rules" "error")))
 
 and reset_rule_form () : unit =
   editing_rule_index := None;
@@ -450,6 +461,7 @@ let fetch_config () : unit =
   let pending = ref 3 in
   let config_ok = ref false in
   let rules_ok = ref false in
+  let fetched_rules = ref [] in
 
   let finish_init () =
     match !pending > 0 with
@@ -463,7 +475,7 @@ let fetch_config () : unit =
          Page_util.set_display loading_el "none";
          Page_util.set_display content_el "block";
          render_tenants ();
-         render_rules ();
+         render_rules !fetched_rules;
          render_defaults ())
   in
 
@@ -483,7 +495,7 @@ let fetch_config () : unit =
     ~on_response:(fun result ->
       (match result with
        | Ok (Ok_rules r) ->
-         rules := r;
+         fetched_rules := r;
          rules_ok := true
        | Ok (Err _) -> ()
        | _ -> ());
