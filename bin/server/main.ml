@@ -21,8 +21,6 @@ type compiled_rule = {
   regex : Re.re;
 }
 
-let push_queue_capacity = 16
-
 type tenant_connection = {
   push_stream : string Eio.Stream.t;
   close : unit -> unit;
@@ -42,7 +40,7 @@ type state = {
 (* Try to push a message to a tenant connection.
    Returns true on success, false if queue is full (client presumed dead). *)
 let try_push (conn : tenant_connection) (msg : string) : bool =
-  match Eio.Stream.length conn.push_stream < push_queue_capacity with
+  match Eio.Stream.length conn.push_stream < Constants.push_queue_capacity with
   | true -> Eio.Stream.add conn.push_stream msg; true
   | false -> conn.close (); false
 
@@ -69,7 +67,9 @@ let default_config () : Protocol.config =
     allowed_networks = Constants.default_allowed_networks;
     tenants = [];
     defaults =
-      { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
+      { unmatched = "local";
+        cooldown_seconds = Constants.default_cooldown_seconds;
+        browser_launch_timeout = Constants.default_browser_launch_timeout };
   }
 
 (* -- Config loading / saving *)
@@ -361,7 +361,7 @@ let update_tenant_config state tenant brand =
       List.Assoc.add state.config.tenants ~equal:String.equal tenant updated
     | None ->
       let new_tenant : Protocol.tenant_config =
-        { browser_cmd = suggested_cmd; label = tenant; color = "#808080"; brand }
+        { browser_cmd = suggested_cmd; label = tenant; color = Constants.default_tenant_color; brand }
       in
       log "auto-added tenant %s to config" tenant;
       state.config.tenants @ [ (tenant, new_tenant) ]
@@ -378,13 +378,9 @@ let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json)
   in
   match cmd with
   | Protocol.Register ->
-    let is_reregister = Map.mem state.registry tenant in
     let registry = Map.set state.registry ~key:tenant ~data:connection in
     resolve (Ok tenant);
-    (match is_reregister with
-     | true -> log "tenant %s re-registered (replacing stale connection)" tenant
-     | false -> log "tenant %s registered (brand=%s)" tenant
-                  (Option.value params.brand ~default:"(none)"));
+    log "tenant %s registered (brand=%s)" tenant (Option.value params.brand ~default:"(none)");
     { state with registry }
     |> fun s -> flush_pending_deliveries s tenant connection
     |> fun s -> update_tenant_config s tenant params.brand
@@ -498,7 +494,7 @@ let rec receive_requests ~tenant inbox connection reader =
         receive_requests ~tenant inbox connection reader
 
 let handle_connection inbox flow =
-  let push_stream = Eio.Stream.create push_queue_capacity in
+  let push_stream = Eio.Stream.create Constants.push_queue_capacity in
   let connection = { push_stream; close = (fun () -> Eio.Flow.close flow) } in
   let tenant =
     Eio.Switch.run @@ fun sw ->
@@ -506,7 +502,7 @@ let handle_connection inbox flow =
       (try forward_pushes push_stream flow
        with Eio.Cancel.Cancelled _ as ex -> raise ex | _ -> ());
       `Stop_daemon);
-    let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
+    let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
     receive_requests ~tenant:None inbox connection reader
   in
   match tenant with
@@ -551,7 +547,7 @@ let start_listeners ~sw net listen_addrs =
     List.filter_map listen_addrs ~f:(fun ({ host; port } : Protocol.listen_address) ->
       match
         let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
-        let listener = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net (`Tcp (ip, port)) in
+        let listener = Eio.Net.listen ~sw ~backlog:Constants.tcp_listen_backlog ~reuse_addr:true net (`Tcp (ip, port)) in
         log "listening on %s:%d" host port;
         listener
       with
@@ -594,7 +590,7 @@ let run config_path =
         start_time = Unix.gettimeofday ();
       }
     in
-    let inbox = Eio.Stream.create 64 in
+    let inbox = Eio.Stream.create Constants.coordinator_inbox_capacity in
     Eio.Switch.run @@ fun sw ->
     let listeners = start_listeners ~sw net config.listen in
     let allowed_networks = config.allowed_networks in

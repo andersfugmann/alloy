@@ -201,7 +201,7 @@ let send_command_cli :
   let flow = connect_to_daemon ~sw net ~host ~port in
   let env = Protocol.make_request_envelope cmd params 1 (Some tenant) in
   Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
-  let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
+  let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let response_line = Eio.Buf_read.line reader in
   match Protocol.deserialize_server_message response_line with
   | Ok (Response resp_env) ->
@@ -220,7 +220,7 @@ let run_register ~net ~host ~port ~tenant =
   in
   let env = Protocol.make_request_envelope Register { brand = None; address = None; name = None } 1 (Some tenant) in
   Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
-  let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
+  let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let first_line = Eio.Buf_read.line reader in
   (match Protocol.deserialize_server_message first_line with
    | Ok (Response resp_env) ->
@@ -291,7 +291,7 @@ let run_bridge env =
   let default_tenant = Unix.gethostname () in
   let stdout_flow = Eio.Stdenv.stdout env in
   let stdin_flow = Eio.Stdenv.stdin env in
-  let stdout_stream = Eio.Stream.create 64 in
+  let stdout_stream = Eio.Stream.create Constants.bridge_stream_capacity in
   (* Wait for a valid Register request; reject anything else *)
   let err_not_registered id =
     Protocol.serialize_server_message
@@ -351,7 +351,7 @@ let run_bridge env =
       Eio.Switch.run @@ fun sw ->
       let flow = connect_to_daemon ~sw net ~host ~port in
       Eio.Flow.copy_string (register_line ^ "\n") flow;
-      let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
+      let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
       (* Read registration response and forward to extension *)
       let first_line = Eio.Buf_read.line reader in
       (match Protocol.deserialize_server_message first_line with

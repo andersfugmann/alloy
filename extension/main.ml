@@ -294,7 +294,8 @@ let handle_context_menu (state : state) (menu_id : string)
        let dialog_url =
          Printf.sprintf "add_rule.html?url=%s" encoded_url
        in
-       Chrome_api.Windows.create_popup ~url:dialog_url ~width:420 ~height:300;
+       Chrome_api.Windows.create_popup ~url:dialog_url
+         ~width:Constants.popup_width ~height:Constants.popup_height;
        state)
   | "delete_rule" ->
     (match String.is_empty url with
@@ -401,7 +402,7 @@ let handle_event (state : state) (event : event) : state =
   | Bridge_message { raw } -> handle_bridge_message state raw
   | Port_disconnected ->
     log "Native port disconnected, reconnecting in 2s…";
-    Chrome_api.set_timeout (fun () -> push Connect_requested) 2000;
+    Chrome_api.set_timeout (fun () -> push Connect_requested) Constants.reconnect_delay_ms;
     { initial_state with debug_logging = state.debug_logging }
   | Connect_requested -> connect state
   | Connect_with_settings { port; tenant_name; daemon_host; daemon_port; debug_logging } ->
