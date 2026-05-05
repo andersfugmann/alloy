@@ -13,6 +13,16 @@ type rule = {
 }
 [@@deriving yojson]
 
+let rules_to_yojson rules =
+  `List (List.map rules ~f:rule_to_yojson)
+
+let rules_of_yojson = function
+  | `List items ->
+    items
+    |> List.map ~f:rule_of_yojson
+    |> Result.all
+  | _ -> Error "rules: expected JSON array"
+
 type tenant_config = {
   browser_cmd : string option; [@default None]
   label : string;
@@ -50,7 +60,7 @@ type config = {
   listen : listen_address list;
   allowed_networks : Cidr.t list;
   tenants : tenants;
-  rules : rule list;
+  rules : rule list; [@default []]
   defaults : defaults;
 }
 [@@deriving yojson]

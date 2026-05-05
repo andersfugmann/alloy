@@ -24,6 +24,7 @@ type compiled_rule = {
 type state = {
   config : Protocol.config;
   config_path : string;
+  rules : Protocol.rule list;
   compiled_rules : compiled_rule list;
   registry : string Eio.Stream.t Map.M(String).t;
   starting : (string * starting_tenant) list;
@@ -37,11 +38,7 @@ type coordinator_action =
   | Dispatch of {
       command : Protocol.packed_command;
       reply : Protocol.Wire.response Eio.Promise.u;
-    }
-  | Register of {
-      brand : string option;
       push_stream : string Eio.Stream.t;
-      reply : (string, string) Result.t Eio.Promise.u;
     }
   | Unregister
   | Launch_timeout
@@ -85,12 +82,40 @@ let save_config_to_path config_path config =
   let content = Yojson.Safe.pretty_to_string json in
   Out_channel.write_all config_path ~data:(content ^ "\n")
 
+let rules_path_of config_path =
+  Stdlib.Filename.dirname config_path ^ "/rules.json"
+
+let save_rules config_path rules =
+  let path = rules_path_of config_path in
+  mkdir_p (Stdlib.Filename.dirname path);
+  let json = Protocol.rules_to_yojson rules in
+  let content = Yojson.Safe.pretty_to_string json in
+  Out_channel.write_all path ~data:(content ^ "\n")
+
+let load_rules config_path =
+  let path = rules_path_of config_path in
+  match Stdlib.Sys.file_exists path with
+  | true ->
+    let content = In_channel.read_all path in
+    Result.bind (Protocol.parse_json_string content) ~f:Protocol.rules_of_yojson
+  | false -> Ok []
+
 let load_config path =
   match Stdlib.Sys.file_exists path with
   | true ->
     let content = In_channel.read_all path in
     Result.bind (Protocol.parse_json_string content) ~f:(fun json ->
-        Protocol.config_of_yojson json)
+      match Protocol.config_of_yojson json with
+      | Ok config ->
+        (* Migrate rules out of config if present *)
+        (match List.is_empty config.rules with
+         | true -> ()
+         | false ->
+           log "found rules in config.json, migrating to rules.json";
+           save_rules path config.rules;
+           save_config_to_path path { config with rules = [] });
+        Ok { config with rules = [] }
+      | Error msg -> Error msg)
   | false ->
     let config = default_config () in
     log "no config found, creating default at %s" path;
@@ -241,127 +266,79 @@ let try_save_config state =
   with exn ->
     Error (Printf.sprintf "failed to save config: %s" (Exn.to_string exn))
 
+let try_save_rules state =
+  try
+    save_rules state.config_path state.rules;
+    Ok ()
+  with exn ->
+    Error (Printf.sprintf "failed to save rules: %s" (Exn.to_string exn))
+
 let handle_set_config state (cfg : Protocol.config) =
   match compile_rules cfg.rules with
   | Error msg -> (state, Error (Printf.sprintf "invalid rules: %s" msg))
   | Ok compiled_rules ->
-    let state = { state with config = cfg; compiled_rules } in
-    (state, try_save_config state)
+    let rules = cfg.rules in
+    let config = { cfg with rules = [] } in
+    let state = { state with config; rules; compiled_rules } in
+    let save_result =
+      Result.bind (try_save_config state) ~f:(fun () -> try_save_rules state)
+    in
+    (state, save_result)
 
 let handle_add_rule state (rule : Protocol.rule) =
   match compile_rule rule with
   | Error msg -> (state, Error msg)
   | Ok compiled ->
-    let config = { state.config with rules = state.config.rules @ [ rule ] } in
+    let rules = state.rules @ [ rule ] in
     let compiled_rules = state.compiled_rules @ [ compiled ] in
-    let state = { state with config; compiled_rules } in
-    (state, try_save_config state)
+    let state = { state with rules; compiled_rules } in
+    (state, try_save_rules state)
 
 let handle_update_rule state idx (rule : Protocol.rule) =
   match compile_rule rule with
   | Error msg -> (state, Error msg)
   | Ok compiled ->
-    let config = state.config in
-    let len = List.length config.rules in
+    let len = List.length state.rules in
     (match idx >= 0 && idx < len with
      | false ->
        (state, Error (Printf.sprintf "rule index %d out of range (0..%d)" idx (len - 1)))
      | true ->
        let new_rules =
-         List.mapi config.rules ~f:(fun i r ->
+         List.mapi state.rules ~f:(fun i r ->
              match Int.equal i idx with true -> rule | false -> r)
        in
        let compiled_rules =
          List.mapi state.compiled_rules ~f:(fun i cr ->
              match Int.equal i idx with true -> compiled | false -> cr)
        in
-       let config = { config with rules = new_rules } in
-       let state = { state with config; compiled_rules } in
-       (state, try_save_config state))
+       let state = { state with rules = new_rules; compiled_rules } in
+       (state, try_save_rules state))
 
 let handle_delete_rule state idx =
-  let config = state.config in
-  let len = List.length config.rules in
+  let len = List.length state.rules in
   match idx >= 0 && idx < len with
   | false ->
     (state, Error (Printf.sprintf "rule index %d out of range (0..%d)" idx (len - 1)))
   | true ->
     let new_rules =
-      List.filteri config.rules ~f:(fun i _ -> not (Int.equal i idx))
+      List.filteri state.rules ~f:(fun i _ -> not (Int.equal i idx))
     in
     let compiled_rules =
       List.filteri state.compiled_rules ~f:(fun i _ -> not (Int.equal i idx))
     in
-    let config = { config with rules = new_rules } in
-    let state = { state with config; compiled_rules } in
-    (state, try_save_config state)
+    let state = { state with rules = new_rules; compiled_rules } in
+    (state, try_save_rules state)
 
 (* -- Command dispatch *)
 
 let broadcast_config (state : state) : unit =
   let registered = Map.keys state.registry in
-  let push_wire = Protocol.Wire.Config_updated { config = state.config; registered_tenants = registered } in
+  let config_with_rules = { state.config with rules = state.rules } in
+  let push_wire = Protocol.Wire.Config_updated { config = config_with_rules; registered_tenants = registered } in
   let msg = Protocol.Wire.Push { id = 0; push = push_wire } in
   let s = Protocol.serialize_server_message msg in
   Map.iter state.registry ~f:(fun stream ->
     Eio.Stream.add stream s)
-
-let dispatch_command :
-    type a. state -> tenant:Protocol.tenant_id -> a Protocol.command ->
-    reply:Protocol.Wire.response Eio.Promise.u ->
-    sw:Eio.Switch.t -> clock:_ Eio.Time.clock ->
-    inbox:coordinator_msg Eio.Stream.t -> state =
- fun state ~tenant cmd ~reply ~sw ~clock ~inbox ->
-  let resolve resp = Eio.Promise.resolve reply (Protocol.response_to_wire cmd resp) in
-  match cmd with
-  | Protocol.Register _ ->
-    resolve (Error "unexpected Register in command mode");
-    state
-  | Protocol.Open url ->
-    let (state, promise) = handle_open state tenant url ~sw ~clock ~inbox in
-    Eio.Fiber.fork ~sw (fun () ->
-      let result = Eio.Promise.await promise in
-      resolve result);
-    state
-  | Protocol.Open_on (target, url) ->
-    let (state, promise) = handle_open_on state target url ~sw ~clock ~inbox in
-    Eio.Fiber.fork ~sw (fun () ->
-      let result = Eio.Promise.await promise in
-      resolve result);
-    state
-  | Protocol.Test url ->
-    let (state, resp) = handle_test state url in
-    resolve resp;
-    state
-  | Protocol.Get_config ->
-    resolve (Ok state.config);
-    state
-  | Protocol.Set_config cfg ->
-    let (state, resp) = handle_set_config state cfg in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
-  | Protocol.Add_rule rule ->
-    let (state, resp) = handle_add_rule state rule in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
-  | Protocol.Update_rule (idx, rule) ->
-    let (state, resp) = handle_update_rule state idx rule in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
-  | Protocol.Delete_rule idx ->
-    let (state, resp) = handle_delete_rule state idx in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
-  | Protocol.Status ->
-    let (state, resp) = handle_status state in
-    resolve resp;
-    state
-
-(* -- Coordinator loop *)
 
 let flush_pending_deliveries state tenant push_stream =
   match List.Assoc.find state.starting ~equal:String.equal tenant with
@@ -399,30 +376,85 @@ let update_tenant_config state tenant brand =
   let _ = try_save_config state in
   state
 
+let dispatch_command :
+    type a. state -> tenant:Protocol.tenant_id -> a Protocol.command ->
+    reply:Protocol.Wire.response Eio.Promise.u ->
+    push_stream:string Eio.Stream.t ->
+    sw:Eio.Switch.t -> clock:_ Eio.Time.clock ->
+    inbox:coordinator_msg Eio.Stream.t -> state =
+ fun state ~tenant cmd ~reply ~push_stream ~sw ~clock ~inbox ->
+  let resolve resp = Eio.Promise.resolve reply (Protocol.response_to_wire cmd resp) in
+  match cmd with
+  | Protocol.Register brand ->
+    let is_reregister = Map.mem state.registry tenant in
+    let registry = Map.set state.registry ~key:tenant ~data:push_stream in
+    resolve (Ok tenant);
+    let state = { state with registry } in
+    let state =
+      match is_reregister with
+      | true ->
+        log "tenant %s re-registering (replacing stale connection)" tenant;
+        state
+      | false ->
+        log "tenant %s registered (brand=%s)" tenant
+          (Option.value brand ~default:"(none)");
+        state
+        |> fun s -> flush_pending_deliveries s tenant push_stream
+        |> fun s -> update_tenant_config s tenant brand
+    in
+    broadcast_config state;
+    state
+  | Protocol.Open url ->
+    let (state, promise) = handle_open state tenant url ~sw ~clock ~inbox in
+    Eio.Fiber.fork ~sw (fun () ->
+      let result = Eio.Promise.await promise in
+      resolve result);
+    state
+  | Protocol.Open_on (target, url) ->
+    let (state, promise) = handle_open_on state target url ~sw ~clock ~inbox in
+    Eio.Fiber.fork ~sw (fun () ->
+      let result = Eio.Promise.await promise in
+      resolve result);
+    state
+  | Protocol.Test url ->
+    let (state, resp) = handle_test state url in
+    resolve resp;
+    state
+  | Protocol.Get_config ->
+    resolve (Ok { state.config with rules = state.rules });
+    state
+  | Protocol.Set_config cfg ->
+    let (state, resp) = handle_set_config state cfg in
+    resolve resp;
+    Result.iter resp ~f:(fun () -> broadcast_config state);
+    state
+  | Protocol.Add_rule rule ->
+    let (state, resp) = handle_add_rule state rule in
+    resolve resp;
+    Result.iter resp ~f:(fun () -> broadcast_config state);
+    state
+  | Protocol.Update_rule (idx, rule) ->
+    let (state, resp) = handle_update_rule state idx rule in
+    resolve resp;
+    Result.iter resp ~f:(fun () -> broadcast_config state);
+    state
+  | Protocol.Delete_rule idx ->
+    let (state, resp) = handle_delete_rule state idx in
+    resolve resp;
+    Result.iter resp ~f:(fun () -> broadcast_config state);
+    state
+  | Protocol.Status ->
+    let (state, resp) = handle_status state in
+    resolve resp;
+    state
+
+(* -- Coordinator loop *)
+
 let rec coordinator_loop state inbox ~sw ~clock =
   let { tenant; action } = Eio.Stream.take inbox in
   let state = match action with
-    | Dispatch { command = Protocol.Command cmd; reply } ->
-      dispatch_command state ~tenant cmd ~reply ~sw ~clock ~inbox
-    | Register { brand; push_stream; reply } ->
-      let is_reregister = Map.mem state.registry tenant in
-      let registry = Map.set state.registry ~key:tenant ~data:push_stream in
-      Eio.Promise.resolve reply (Ok tenant);
-      let state = { state with registry } in
-      let state =
-        match is_reregister with
-        | true ->
-          log "tenant %s re-registering (replacing stale connection)" tenant;
-          state
-        | false ->
-          log "tenant %s registered (brand=%s)" tenant
-            (Option.value brand ~default:"(none)");
-          state
-          |> fun s -> flush_pending_deliveries s tenant push_stream
-          |> fun s -> update_tenant_config s tenant brand
-      in
-      broadcast_config state;
-      state
+    | Dispatch { command = Protocol.Command cmd; reply; push_stream } ->
+      dispatch_command state ~tenant cmd ~reply ~push_stream ~sw ~clock ~inbox
     | Unregister ->
       let registry = Map.remove state.registry tenant in
       log "tenant %s unregistered" tenant;
@@ -443,7 +475,7 @@ let rec coordinator_loop state inbox ~sw ~clock =
   in
   coordinator_loop state inbox ~sw ~clock
 
-(* -- Registration (long-lived connection) *)
+(* -- Connection handling *)
 
 let rec forward_pushes push_stream flow =
   let msg = Eio.Stream.take push_stream in
@@ -454,70 +486,43 @@ let serialize_response id response =
   Protocol.Wire.Response { id; response }
   |> Protocol.serialize_server_message
 
-let rec receive_requests tenant inbox push_stream reader =
-  let line = Eio.Buf_read.line reader in
-  let () = match Protocol.deserialize_request line with
+let rec receive_requests ~tenant inbox push_stream reader =
+  match Eio.Buf_read.line reader with
+  | exception _ -> tenant
+  | line ->
+    match Protocol.deserialize_request line with
     | Error msg ->
-      log "req[%s]: parse error: %s" tenant msg
-    | Ok { id; command; _ } ->
-      log "req[%s]: id=%d %s" tenant id (Protocol.name_of_command command);
+      log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
+      receive_requests ~tenant inbox push_stream reader
+    | Ok { id; command; tenant = req_tenant } ->
+      let tenant_name = Option.value (Option.first_some req_tenant tenant) ~default:"anonymous" in
+      log "req[%s]: id=%d %s" tenant_name id (Protocol.name_of_command command);
       let (promise, reply) = Eio.Promise.create () in
-      Eio.Stream.add inbox { tenant; action = Dispatch { command = Protocol.command_of_wire command; reply } };
+      Eio.Stream.add inbox { tenant = tenant_name; action = Dispatch { command = Protocol.command_of_wire command; reply; push_stream } };
       let response = Eio.Promise.await promise in
       let msg = serialize_response id response in
-      log "res[%s]: %s" tenant msg;
-      Eio.Stream.add push_stream msg
-  in
-  receive_requests tenant inbox push_stream reader
-
-let handle_register inbox ~tenant ~brand ~register_id flow reader =
-  let push_stream = Eio.Stream.create 16 in
-  let (promise, reply) = Eio.Promise.create () in
-  Eio.Stream.add inbox { tenant; action = Register { brand; push_stream; reply } };
-  match Eio.Promise.await promise with
-  | Error msg ->
-    let err_msg = Protocol.Wire.Response { id = register_id; response = Err { message = msg } } in
-    Eio.Flow.copy_string (Protocol.serialize_server_message err_msg ^ "\n") flow
-  | Ok tenant_id ->
-    begin
-      try
-        let ok_msg = Protocol.Wire.Response { id = register_id; response = Ok_registered { tenant_id } } in
-        Eio.Flow.copy_string (Protocol.serialize_server_message ok_msg ^ "\n") flow;
-        Eio.Fiber.first
-          (fun () -> forward_pushes push_stream flow)
-          (fun () -> receive_requests tenant inbox push_stream reader)
-      with
-      | _ -> ()
-    end;
-    Eio.Stream.add inbox { tenant; action = Unregister }
-
-(* -- Connection handling *)
+      log "res[%s]: %s" tenant_name msg;
+      Eio.Stream.add push_stream msg;
+      let tenant =
+        match response with
+        | Protocol.Wire.Ok_registered { tenant_id } -> Some tenant_id
+        | _ -> tenant
+      in
+      receive_requests ~tenant inbox push_stream reader
 
 let handle_connection inbox flow =
-  let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
-  match Eio.Buf_read.line reader with
-  | exception (End_of_file | Eio.Io _) -> ()
-  | line ->
-    log "req: %s" line;
-    match Protocol.deserialize_request line with
-     | Error msg ->
-       let resp = serialize_response 0 (Err { message = msg }) in
-       log "res: %s" resp;
-       Eio.Flow.copy_string (resp ^ "\n") flow
-     | Ok { id; tenant; command; } ->
-       let tenant = Option.value tenant ~default:"default" in
-       match Protocol.command_of_wire command with
-        | Command (Register brand) ->
-          log "res[%s]: registering (brand=%s)" tenant
-            (Option.value brand ~default:"(none)");
-          handle_register inbox ~tenant ~brand ~register_id:id flow reader
-        | packed_cmd ->
-          let (promise, reply) = Eio.Promise.create () in
-          Eio.Stream.add inbox { tenant; action = Dispatch { command = packed_cmd; reply } };
-          let response = Eio.Promise.await promise in
-          let msg = serialize_response id response in
-          log "res[%s]: %s" tenant msg;
-          Eio.Flow.copy_string (msg ^ "\n") flow
+  let push_stream = Eio.Stream.create 16 in
+  let tenant =
+    Eio.Switch.run @@ fun sw ->
+    Eio.Fiber.fork_daemon ~sw (fun () ->
+      (try forward_pushes push_stream flow with _ -> ());
+      `Stop_daemon);
+    let reader = Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow in
+    receive_requests ~tenant:None inbox push_stream reader
+  in
+  match tenant with
+  | Some name -> Eio.Stream.add inbox { tenant = name; action = Unregister }
+  | None -> ()
 
 (* -- Main *)
 
@@ -530,15 +535,20 @@ let load_and_validate_config config_path =
     | Ok c -> c
     | Error msg -> failwith msg
   in
+  let rules =
+    match load_rules config_path with
+    | Ok r -> r
+    | Error msg -> failwith (Printf.sprintf "failed to load rules: %s" msg)
+  in
   let compiled_rules =
-    match compile_rules config.rules with
+    match compile_rules rules with
     | Ok cr -> cr
     | Error msg -> failwith (Printf.sprintf "invalid rules in config: %s" msg)
   in
   (match List.is_empty config.allowed_networks with
    | true -> failwith "no valid allowed_networks configured — all connections would be rejected"
    | false -> ());
-  (config, compiled_rules)
+  (config, rules, compiled_rules)
 
 let check_connection_allowed ~allowed_networks addr =
   match addr with
@@ -582,11 +592,12 @@ let run config_path =
     Eio_main.run @@ fun env ->
     let clock = Eio.Stdenv.clock env in
     let net = Eio.Stdenv.net env in
-    let (config, compiled_rules) = load_and_validate_config config_path in
+    let (config, rules, compiled_rules) = load_and_validate_config config_path in
     let initial_state =
       {
         config;
         config_path;
+        rules;
         compiled_rules;
         registry = Map.empty (module String);
         starting = [];

@@ -1,0 +1,12 @@
+[
+  {
+    "pattern": "https://github[.]com/.*",
+    "target": "work-container",
+    "enabled": true
+  },
+  {
+    "pattern": "https://mail[.]google[.]com/.*",
+    "target": "host-machine",
+    "enabled": true
+  }
+]
