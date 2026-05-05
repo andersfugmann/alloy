@@ -54,7 +54,6 @@ let default_config () : Protocol.config =
 
     allowed_networks = Constants.default_allowed_networks;
     tenants = [];
-    rules = [];
     defaults =
       { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
   }
@@ -108,13 +107,25 @@ let load_config path =
       match Protocol.config_of_yojson json with
       | Ok config ->
         (* Migrate rules out of config if present *)
-        (match List.is_empty config.rules with
-         | true -> ()
-         | false ->
-           log "found rules in config.json, migrating to rules.json";
-           save_rules path config.rules;
-           save_config_to_path path { config with rules = [] });
-        Ok { config with rules = [] }
+        let rules_json = Yojson.Safe.Util.member "rules" json in
+        (match rules_json with
+         | `Null -> ()
+         | rules_json ->
+           (match Protocol.rules_of_yojson rules_json with
+            | Ok rules ->
+              log "found rules in config.json, migrating to rules.json";
+              save_rules path rules;
+              let stripped =
+                match json with
+                | `Assoc fields ->
+                  `Assoc (List.filter fields ~f:(fun (k, _) -> not (String.equal k "rules")))
+                | other -> other
+              in
+              let content = Yojson.Safe.pretty_to_string stripped in
+              Out_channel.write_all path ~data:(content ^ "\n")
+            | Error msg ->
+              log "warning: could not parse rules from config: %s" msg));
+        Ok config
       | Error msg -> Error msg)
   | false ->
     let config = default_config () in
@@ -274,67 +285,28 @@ let try_save_rules state =
     Error (Printf.sprintf "failed to save rules: %s" (Exn.to_string exn))
 
 let handle_set_config state (cfg : Protocol.config) =
-  match compile_rules cfg.rules with
+  let state = { state with config = cfg } in
+  (state, try_save_config state)
+
+let handle_set_rules state (rules : Protocol.rule list) =
+  match compile_rules rules with
   | Error msg -> (state, Error (Printf.sprintf "invalid rules: %s" msg))
   | Ok compiled_rules ->
-    let rules = cfg.rules in
-    let config = { cfg with rules = [] } in
-    let state = { state with config; rules; compiled_rules } in
-    let save_result =
-      Result.bind (try_save_config state) ~f:(fun () -> try_save_rules state)
-    in
-    (state, save_result)
-
-let handle_add_rule state (rule : Protocol.rule) =
-  match compile_rule rule with
-  | Error msg -> (state, Error msg)
-  | Ok compiled ->
-    let rules = state.rules @ [ rule ] in
-    let compiled_rules = state.compiled_rules @ [ compiled ] in
     let state = { state with rules; compiled_rules } in
-    (state, try_save_rules state)
-
-let handle_update_rule state idx (rule : Protocol.rule) =
-  match compile_rule rule with
-  | Error msg -> (state, Error msg)
-  | Ok compiled ->
-    let len = List.length state.rules in
-    (match idx >= 0 && idx < len with
-     | false ->
-       (state, Error (Printf.sprintf "rule index %d out of range (0..%d)" idx (len - 1)))
-     | true ->
-       let new_rules =
-         List.mapi state.rules ~f:(fun i r ->
-             match Int.equal i idx with true -> rule | false -> r)
-       in
-       let compiled_rules =
-         List.mapi state.compiled_rules ~f:(fun i cr ->
-             match Int.equal i idx with true -> compiled | false -> cr)
-       in
-       let state = { state with rules = new_rules; compiled_rules } in
-       (state, try_save_rules state))
-
-let handle_delete_rule state idx =
-  let len = List.length state.rules in
-  match idx >= 0 && idx < len with
-  | false ->
-    (state, Error (Printf.sprintf "rule index %d out of range (0..%d)" idx (len - 1)))
-  | true ->
-    let new_rules =
-      List.filteri state.rules ~f:(fun i _ -> not (Int.equal i idx))
-    in
-    let compiled_rules =
-      List.filteri state.compiled_rules ~f:(fun i _ -> not (Int.equal i idx))
-    in
-    let state = { state with rules = new_rules; compiled_rules } in
     (state, try_save_rules state)
 
 (* -- Command dispatch *)
 
 let broadcast_config (state : state) : unit =
   let registered = Map.keys state.registry in
-  let config_with_rules = { state.config with rules = state.rules } in
-  let push_wire = Protocol.Wire.Config_updated { config = config_with_rules; registered_tenants = registered } in
+  let push_wire = Protocol.Wire.Config_updated { config = state.config; registered_tenants = registered } in
+  let msg = Protocol.Wire.Push { id = 0; push = push_wire } in
+  let s = Protocol.serialize_server_message msg in
+  Map.iter state.registry ~f:(fun stream ->
+    Eio.Stream.add stream s)
+
+let broadcast_rules (state : state) : unit =
+  let push_wire = Protocol.Wire.Rules_updated { rules = state.rules } in
   let msg = Protocol.Wire.Push { id = 0; push = push_wire } in
   let s = Protocol.serialize_server_message msg in
   Map.iter state.registry ~f:(fun stream ->
@@ -421,27 +393,20 @@ let dispatch_command :
     resolve resp;
     state
   | Protocol.Get_config ->
-    resolve (Ok { state.config with rules = state.rules });
+    resolve (Ok state.config);
     state
   | Protocol.Set_config cfg ->
     let (state, resp) = handle_set_config state cfg in
     resolve resp;
     Result.iter resp ~f:(fun () -> broadcast_config state);
     state
-  | Protocol.Add_rule rule ->
-    let (state, resp) = handle_add_rule state rule in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
+  | Protocol.Get_rules ->
+    resolve (Ok state.rules);
     state
-  | Protocol.Update_rule (idx, rule) ->
-    let (state, resp) = handle_update_rule state idx rule in
+  | Protocol.Set_rules rules ->
+    let (state, resp) = handle_set_rules state rules in
     resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
-    state
-  | Protocol.Delete_rule idx ->
-    let (state, resp) = handle_delete_rule state idx in
-    resolve resp;
-    Result.iter resp ~f:(fun () -> broadcast_config state);
+    Result.iter resp ~f:(fun () -> broadcast_rules state);
     state
   | Protocol.Status ->
     let (state, resp) = handle_status state in

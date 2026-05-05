@@ -185,6 +185,7 @@ let response_type_name (resp : Protocol.Wire.response) : string =
   | Ok_route _ -> "Ok_route"
   | Ok_test _ -> "Ok_test"
   | Ok_config _ -> "Ok_config"
+  | Ok_rules _ -> "Ok_rules"
   | Ok_status _ -> "Ok_status"
   | Ok_unit -> "Ok_unit"
   | Err _ -> "Err"
@@ -206,6 +207,9 @@ let handle_push (state : state) (p : Protocol.Wire.push) : state =
     let tenants = List.map cfg.tenants ~f:(fun (id, tc) ->
       (id, tc.Protocol.label, Set.mem registered_set id)) in
     push (Refresh_menus { tenants });
+    state
+  | Rules_updated { rules = _ } ->
+    log "Rules updated push received";
     state
 
 let handle_bridge_message (state : state) (raw : string) : state =
@@ -394,14 +398,23 @@ let setup_context_menus (tenants : (string * string * bool) list) (self_id : str
     create_context_menu ~id:"delete_rule" ~title:"Delete matching rule" ~contexts:[ "page"; "link" ])
 
 let handle_delete_rule_at (state : state) (index : int) : state =
-  send_command state (Command (Delete_rule index)) (fun wire_resp ->
+  send_command state (Command Get_rules) (fun wire_resp ->
       match wire_resp with
-      | Protocol.Wire.Ok_unit ->
-        log (Printf.sprintf "Deleted rule at index %d" index)
+      | Protocol.Wire.Ok_rules existing ->
+        let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i index)) in
+        send_command state (Command (Set_rules updated)) (fun wire_resp ->
+            match wire_resp with
+            | Protocol.Wire.Ok_unit ->
+              log (Printf.sprintf "Deleted rule at index %d" index)
+            | Err { message } ->
+              log (Printf.sprintf "Delete rule error: %s" message)
+            | _ ->
+              log "Unexpected response for Set_rules")
+        |> ignore
       | Err { message } ->
-        log (Printf.sprintf "Delete rule error: %s" message)
+        log (Printf.sprintf "Failed to fetch rules: %s" message)
       | _ ->
-        log "Unexpected response for Delete_rule")
+        log "Unexpected response for Get_rules")
 
 let handle_event (state : state) (event : event) : state =
   match event with

@@ -81,18 +81,28 @@ let () =
             Page_util.set_text error_div
               (Printf.sprintf "Invalid regex: %s" msg)
           | Ok () ->
-            let rule : Protocol.rule =
+            let new_rule : Protocol.rule =
               { pattern; target = tenant; enabled = true }
             in
-            Page_util.send_protocol_command (Add_rule { rule })
+            Page_util.send_protocol_command Get_rules
               ~on_response:(fun result ->
                 match result with
-                | Ok Ok_unit -> Dom_html.window##close
+                | Ok (Ok_rules existing) ->
+                  let updated = existing @ [ new_rule ] in
+                  Page_util.send_protocol_command (Set_rules { rules = updated })
+                    ~on_response:(fun result ->
+                      match result with
+                      | Ok Ok_unit -> Dom_html.window##close
+                      | Ok (Err { message }) ->
+                        Page_util.set_text error_div
+                          (Printf.sprintf "Error: %s" message)
+                      | Ok _ ->
+                        Page_util.set_text error_div "Unexpected response"
+                      | Error msg ->
+                        Page_util.set_text error_div
+                          (Printf.sprintf "Error: %s" msg))
                 | Ok (Err { message }) ->
                   Page_util.set_text error_div
-                    (Printf.sprintf "Error: %s" message)
-                | Ok _ ->
-                  Page_util.set_text error_div "Unexpected response"
-                | Error msg ->
-                  Page_util.set_text error_div
-                    (Printf.sprintf "Error: %s" msg)))))
+                    (Printf.sprintf "Error fetching rules: %s" message)
+                | _ ->
+                  Page_util.set_text error_div "Failed to fetch current rules"))))

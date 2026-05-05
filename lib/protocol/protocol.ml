@@ -60,7 +60,6 @@ type config = {
   listen : listen_address list;
   allowed_networks : Cidr.t list;
   tenants : tenants;
-  rules : rule list; [@default []]
   defaults : defaults;
 }
 [@@deriving yojson]
@@ -92,9 +91,8 @@ type _ command =
   | Test : url -> test_result command
   | Get_config : config command
   | Set_config : config -> unit command
-  | Add_rule : rule -> unit command
-  | Update_rule : int * rule -> unit command
-  | Delete_rule : int -> unit command
+  | Get_rules : rule list command
+  | Set_rules : rule list -> unit command
   | Status : status_info command
 
 (* -- Existential wrappers *)
@@ -120,9 +118,8 @@ module Wire = struct
     | Test of { url : string }
     | Get_config
     | Set_config of { config : config }
-    | Add_rule of { rule : rule }
-    | Update_rule of { index : int; rule : rule }
-    | Delete_rule of { index : int }
+    | Get_rules
+    | Set_rules of { rules : rule list }
     | Status
   [@@deriving yojson]
 
@@ -132,6 +129,7 @@ module Wire = struct
     | Ok_route of route_result
     | Ok_test of test_result
     | Ok_config of config
+    | Ok_rules of rule list
     | Ok_status of status_info
     | Err of { message : string }
   [@@deriving yojson]
@@ -140,6 +138,7 @@ module Wire = struct
     | Navigate of { url : string }
     | Registered of { tenant_id : string }
     | Config_updated of { config : config; registered_tenants : string list }
+    | Rules_updated of { rules : rule list }
   [@@deriving yojson]
 
   type request = {
@@ -164,9 +163,8 @@ let command_to_wire : type a. a command -> Wire.command = function
   | Test url -> Test { url }
   | Get_config -> Get_config
   | Set_config cfg -> Set_config { config = cfg }
-  | Add_rule r -> Add_rule { rule = r }
-  | Update_rule (idx, r) -> Update_rule { index = idx; rule = r }
-  | Delete_rule idx -> Delete_rule { index = idx }
+  | Get_rules -> Get_rules
+  | Set_rules rules -> Set_rules { rules }
   | Status -> Status
 
 let command_of_wire: Wire.command -> packed_command = function
@@ -176,9 +174,8 @@ let command_of_wire: Wire.command -> packed_command = function
   | Test { url } -> Command (Test url)
   | Get_config -> Command Get_config
   | Set_config { config } -> Command (Set_config config)
-  | Add_rule { rule } -> Command (Add_rule rule)
-  | Update_rule { index; rule } -> Command (Update_rule (index, rule))
-  | Delete_rule { index } -> Command (Delete_rule index)
+  | Get_rules -> Command Get_rules
+  | Set_rules { rules } -> Command (Set_rules rules)
   | Status -> Command Status
 
 let response_to_wire : type a. a command -> (a, string) Result.t -> Wire.response =
@@ -193,9 +190,8 @@ let response_to_wire : type a. a command -> (a, string) Result.t -> Wire.respons
     | Test _ -> Ok_test value
     | Get_config -> Ok_config value
     | Set_config _ -> Ok_unit
-    | Add_rule _ -> Ok_unit
-    | Update_rule _ -> Ok_unit
-    | Delete_rule _ -> Ok_unit
+    | Get_rules -> Ok_rules value
+    | Set_rules _ -> Ok_unit
     | Status -> Ok_status value
 
 let name_of_resp = function
@@ -204,6 +200,7 @@ let name_of_resp = function
   | Wire.Ok_route _ -> "Ok_route"
   | Wire.Ok_test _ -> "Ok_test"
   | Wire.Ok_config _ -> "Ok_config"
+  | Wire.Ok_rules _ -> "Ok_rules"
   | Wire.Ok_status _ -> "Ok_status"
   | Wire.Err _ -> "Err"
 
@@ -217,11 +214,10 @@ let response_of_wire : type a. a command -> Wire.response -> (a, string) Result.
   | Ok_route r, Open_on _ -> return r
   | Ok_test t, Test _  -> return t
   | Ok_config c, Get_config -> return c
+  | Ok_rules r, Get_rules -> return r
   | Ok_status s, Status -> return s
   | Ok_unit, Set_config _ -> return ()
-  | Ok_unit, Add_rule _ -> return ()
-  | Ok_unit, Update_rule _ -> return ()
-  | Ok_unit, Delete_rule _ -> return ()
+  | Ok_unit, Set_rules _ -> return ()
   | resp, _ -> failf "unexpected %s" (name_of_resp resp)
 
 (* -- JSON serialization helpers *)
@@ -240,9 +236,8 @@ let name_of_command : Wire.command -> string = function
   | Test _ -> "Test"
   | Get_config -> "Get_config"
   | Set_config _ -> "Set_config"
-  | Add_rule _ -> "Add_rule"
-  | Update_rule _ -> "Update_rule"
-  | Delete_rule _ -> "Delete_rule"
+  | Get_rules -> "Get_rules"
+  | Set_rules _ -> "Set_rules"
   | Status -> "Status"
 
 let serialize_server_message msg =
@@ -272,15 +267,17 @@ let%expect_test "GADT command round-trip" =
   test (Open "https://x.com") "open";
   test (Open_on ("work", "https://x.com")) "open_on";
   test Get_config "get_config";
+  test Get_rules "get_rules";
+  test (Set_rules []) "set_rules";
   test Status "status";
-  test (Delete_rule 3) "delete_rule";
   [%expect {|
     register: ok
     open: ok
     open_on: ok
     get_config: ok
+    get_rules: ok
+    set_rules: ok
     status: ok
-    delete_rule: ok
     |}]
 
 let%expect_test "deserialize: invalid json string" =

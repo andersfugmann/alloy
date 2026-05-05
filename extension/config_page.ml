@@ -15,10 +15,11 @@ let config : Protocol.config ref =
       listen = Constants.default_listen;
       allowed_networks = Constants.default_allowed_networks;
       tenants = [];
-      rules = [];
       defaults =
         { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
     }
+
+let rules : Protocol.rule list ref = ref []
 
 let connected_tenants : Set.M(String).t ref =
   ref (Set.empty (module String))
@@ -267,21 +268,30 @@ and reset_tenant_form () : unit =
 
 (* -- Rule CRUD (mutually recursive) -- *)
 
+and send_set_rules () : unit =
+  Page_util.send_protocol_command (Set_rules { rules = !rules })
+    ~on_response:(fun result ->
+      match result with
+      | Ok Ok_unit -> render_rules ()
+      | Ok (Err { message }) ->
+        show_msg (Printf.sprintf "Error saving rules: %s" message) "error"
+      | _ -> show_msg "Unexpected response" "error")
+
 and render_rules () : unit =
-  let rules = !config.rules in
+  let current_rules = !rules in
   let resolve_label target =
     match List.Assoc.find !config.tenants ~equal:String.equal target with
     | Some tc ->
       (match String.is_empty tc.label with true -> target | false -> tc.label)
     | None -> target
   in
-  match List.is_empty rules with
+  match List.is_empty current_rules with
   | true ->
     Page_util.set_html rule_list_el
       {|<div class="card-empty">No routing rules configured.</div>|}
   | false ->
     let html =
-      List.mapi rules ~f:(fun i r ->
+      List.mapi current_rules ~f:(fun i r ->
         let on_class = match r.enabled with true -> "on" | false -> "" in
         Printf.sprintf
           {|<div class="row-item rule-row">
@@ -307,15 +317,12 @@ and render_rules () : unit =
       ~selector:"[data-toggle-rule]" ~attr:"data-toggle-rule"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        config :=
-          { !config with
-            rules =
-              List.mapi !config.rules ~f:(fun i r ->
-                match Int.equal i idx with
-                | true -> { r with enabled = not r.enabled }
-                | false -> r)
-          };
-        render_rules ());
+        rules :=
+          List.mapi !rules ~f:(fun i r ->
+            match Int.equal i idx with
+            | true -> { r with enabled = not r.enabled }
+            | false -> r);
+        send_set_rules ());
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-edit-rule]" ~attr:"data-edit-rule"
       ~f:(fun idx_s -> edit_rule (Int.of_string idx_s));
@@ -323,11 +330,9 @@ and render_rules () : unit =
       ~selector:"[data-del-rule]" ~attr:"data-del-rule"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        config :=
-          { !config with
-            rules = List.filteri !config.rules ~f:(fun i _ -> not (Int.equal i idx))
-          };
-        render_rules ());
+        rules :=
+          List.filteri !rules ~f:(fun i _ -> not (Int.equal i idx));
+        send_set_rules ());
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-move-rule-up]" ~attr:"data-move-rule-up"
       ~f:(fun idx_s ->
@@ -335,20 +340,20 @@ and render_rules () : unit =
         (match idx > 0 with
          | false -> ()
          | true ->
-           config := { !config with rules = swap_nth (idx - 1) !config.rules };
-           render_rules ()));
+           rules := swap_nth (idx - 1) !rules;
+           send_set_rules ()));
     Page_util.bind_clicks rule_list_el
       ~selector:"[data-move-rule-down]" ~attr:"data-move-rule-down"
       ~f:(fun idx_s ->
         let idx = Int.of_string idx_s in
-        (match idx < List.length !config.rules - 1 with
+        (match idx < List.length !rules - 1 with
          | false -> ()
          | true ->
-           config := { !config with rules = swap_nth idx !config.rules };
-           render_rules ()))
+           rules := swap_nth idx !rules;
+           send_set_rules ()))
 
 and edit_rule (idx : int) : unit =
-  match List.nth !config.rules idx with
+  match List.nth !rules idx with
   | None -> ()
   | Some r ->
     editing_rule_index := Some idx;
@@ -376,23 +381,19 @@ and save_rule () : unit =
           (match !editing_rule_index with
            | Some idx ->
              let prev_enabled =
-               match List.nth !config.rules idx with
+               match List.nth !rules idx with
                | Some r -> r.enabled
                | None -> true
              in
-             config :=
-               { !config with
-                 rules =
-                   List.mapi !config.rules ~f:(fun i r ->
-                     match Int.equal i idx with
-                     | true -> { rule with enabled = prev_enabled }
-                     | false -> r)
-               }
+             rules :=
+               List.mapi !rules ~f:(fun i r ->
+                 match Int.equal i idx with
+                 | true -> { rule with enabled = prev_enabled }
+                 | false -> r)
            | None ->
-             config :=
-               { !config with rules = !config.rules @ [ rule ] });
+             rules := !rules @ [ rule ]);
           reset_rule_form ();
-          render_rules ()))
+          send_set_rules ()))
 
 and reset_rule_form () : unit =
   editing_rule_index := None;
@@ -446,14 +447,15 @@ let save_config () : unit =
 (* -- Fetch config + status -- *)
 
 let fetch_config () : unit =
-  let pending = ref 2 in
+  let pending = ref 3 in
   let config_ok = ref false in
+  let rules_ok = ref false in
 
   let finish_init () =
     match !pending > 0 with
     | true -> ()
     | false ->
-      (match !config_ok with
+      (match !config_ok && !rules_ok with
        | false ->
          set_status false;
          Page_util.set_text loading_el "Failed to load configuration."
@@ -473,6 +475,17 @@ let fetch_config () : unit =
          config := cfg;
          config_ok := true
        | Ok (Err _) -> set_status false
+       | _ -> ());
+      pending := !pending - 1;
+      finish_init ());
+
+  Page_util.send_protocol_command Get_rules
+    ~on_response:(fun result ->
+      (match result with
+       | Ok (Ok_rules r) ->
+         rules := r;
+         rules_ok := true
+       | Ok (Err _) -> ()
        | _ -> ());
       pending := !pending - 1;
       finish_init ());

@@ -15,12 +15,13 @@ type cli_options = {
   name : string option;
 }
 
-let parse_rule_json json_str =
+let parse_rules_file json_file =
+  let content = In_channel.read_all json_file in
   match
-    Result.bind (Protocol.parse_json_string json_str) ~f:Protocol.rule_of_yojson
+    Result.bind (Protocol.parse_json_string content) ~f:Protocol.rules_of_yojson
   with
-  | Ok rule -> rule
-  | Error msg -> failwith (Printf.sprintf "invalid rule JSON: %s" msg)
+  | Ok rules -> rules
+  | Error msg -> failwith (Printf.sprintf "invalid rules JSON: %s" msg)
 
 let parse_config_file json_file =
   let content = In_channel.read_all json_file in
@@ -29,11 +30,6 @@ let parse_config_file json_file =
   with
   | Ok cfg -> cfg
   | Error msg -> failwith (Printf.sprintf "invalid config JSON: %s" msg)
-
-let parse_index idx_str =
-  match Int.of_string_opt idx_str with
-  | Some i -> i
-  | None -> failwith (Printf.sprintf "invalid index: %s" idx_str)
 
 let cli_term () =
   let open Cmdliner in
@@ -115,42 +111,22 @@ let cli_term () =
               make_opts (Cli_command (Command (Set_config (parse_config_file json_file)))))
             $ json_file $ host_opt $ port_opt $ name_opt)
   in
-  let add_rule_cmd =
-    let doc = "Add a routing rule (JSON)." in
-    let json_str =
-      Arg.(required & pos 0 (some string) None
-           & info [] ~docv:"JSON" ~doc:"Rule as JSON string.")
-    in
-    Cmd.v (Cmd.info "add-rule" ~doc)
-      Term.(const (fun json_str ->
-              make_opts (Cli_command (Command (Add_rule (parse_rule_json json_str)))))
-            $ json_str $ host_opt $ port_opt $ name_opt)
+  let get_rules_cmd =
+    let doc = "Get the current routing rules." in
+    Cmd.v (Cmd.info "get-rules" ~doc)
+      Term.(const (make_opts (Cli_command (Command Get_rules)))
+            $ host_opt $ port_opt $ name_opt)
   in
-  let update_rule_cmd =
-    let doc = "Update a routing rule at the given index." in
-    let idx =
+  let set_rules_cmd =
+    let doc = "Set routing rules from a JSON file." in
+    let json_file =
       Arg.(required & pos 0 (some string) None
-           & info [] ~docv:"INDEX" ~doc:"Rule index (0-based).")
+           & info [] ~docv:"FILE" ~doc:"Path to JSON rules file.")
     in
-    let json_str =
-      Arg.(required & pos 1 (some string) None
-           & info [] ~docv:"JSON" ~doc:"Rule as JSON string.")
-    in
-    Cmd.v (Cmd.info "update-rule" ~doc)
-      Term.(const (fun idx_str json_str ->
-              make_opts (Cli_command (Command (Update_rule (parse_index idx_str, parse_rule_json json_str)))))
-            $ idx $ json_str $ host_opt $ port_opt $ name_opt)
-  in
-  let delete_rule_cmd =
-    let doc = "Delete a routing rule at the given index." in
-    let idx =
-      Arg.(required & pos 0 (some string) None
-           & info [] ~docv:"INDEX" ~doc:"Rule index (0-based).")
-    in
-    Cmd.v (Cmd.info "delete-rule" ~doc)
-      Term.(const (fun idx_str ->
-              make_opts (Cli_command (Command (Delete_rule (parse_index idx_str)))))
-            $ idx $ host_opt $ port_opt $ name_opt)
+    Cmd.v (Cmd.info "set-rules" ~doc)
+      Term.(const (fun json_file ->
+              make_opts (Cli_command (Command (Set_rules (parse_rules_file json_file)))))
+            $ json_file $ host_opt $ port_opt $ name_opt)
   in
   let status_cmd =
     let doc = "Show daemon status." in
@@ -160,8 +136,8 @@ let cli_term () =
   in
   Cmd.group (Cmd.info "alloy" ~doc:"Alloy URL routing client")
     [ bridge_cmd; register_cmd; open_cmd; open_on_cmd; test_cmd;
-      get_config_cmd; set_config_cmd; add_rule_cmd; update_rule_cmd;
-      delete_rule_cmd; status_cmd ]
+      get_config_cmd; set_config_cmd; get_rules_cmd; set_rules_cmd;
+      status_cmd ]
 
 (* Format response as human-readable CLI output *)
 
@@ -187,9 +163,9 @@ let format_response : type a. a Protocol.command -> (a, string) Result.t -> stri
     | Protocol.Get_config ->
       Yojson.Safe.pretty_to_string (Protocol.config_to_yojson value)
     | Protocol.Set_config _ -> "OK"
-    | Protocol.Add_rule _ -> "OK"
-    | Protocol.Update_rule _ -> "OK"
-    | Protocol.Delete_rule _ -> "OK"
+    | Protocol.Get_rules ->
+      Yojson.Safe.pretty_to_string (Protocol.rules_to_yojson value)
+    | Protocol.Set_rules _ -> "OK"
     | Protocol.Status ->
       Printf.sprintf "Tenants: %s\nUptime: %ds"
         (String.concat ~sep:", " value.registered_tenants)
@@ -262,6 +238,8 @@ let run_register ~net ~host ~port ~tenant =
        | Ok (Push { id = _; push = Config_updated { config = cfg; registered_tenants } }) ->
          printf "CONFIG_UPDATED tenants=%d registered=%d\n%!"
            (List.length cfg.tenants) (List.length registered_tenants)
+       | Ok (Push { id = _; push = Rules_updated { rules } }) ->
+         printf "RULES_UPDATED count=%d\n%!" (List.length rules)
        | Ok (Push { id = _; push = Registered { tenant_id } }) ->
          printf "RE-REGISTERED %s\n%!" tenant_id
        | Ok (Response _) ->
