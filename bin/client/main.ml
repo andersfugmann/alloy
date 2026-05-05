@@ -3,8 +3,15 @@ open! Stdio
 
 (* -- CLI argument parsing *)
 
+type cli_command =
+  | Cli_cmd : {
+      cmd : ('req, 'resp) Protocol.command;
+      params : 'req;
+      format : 'resp -> string;
+    } -> cli_command
+
 type cli_mode =
-  | Cli_command of Protocol.packed_request
+  | Cli_command of cli_command
   | Bridge
   | Register_stream
 
@@ -30,6 +37,23 @@ let parse_config_file json_file =
   with
   | Ok cfg -> cfg
   | Error msg -> failwith (Printf.sprintf "invalid config JSON: %s" msg)
+
+(* Format response as human-readable CLI output *)
+
+let format_route_result = function
+  | Protocol.Local -> "Local"
+  | Protocol.Remote tid -> Printf.sprintf "Remote: %s" tid
+
+let format_test_result = function
+  | Protocol.Match { tenant; rule_index } ->
+    Printf.sprintf "Match: tenant=%s rule=%d" tenant rule_index
+  | Protocol.No_match { default_tenant } ->
+    Printf.sprintf "No match: default=%s" default_tenant
+
+let format_status v =
+  Printf.sprintf "Tenants: %s\nUptime: %ds"
+    (String.concat ~sep:", " v.Protocol.registered_tenants)
+    v.Protocol.uptime_seconds
 
 let cli_term () =
   let open Cmdliner in
@@ -66,7 +90,7 @@ let cli_term () =
            & info [] ~docv:"URL" ~doc:"URL to open.")
     in
     Cmd.v (Cmd.info "open" ~doc)
-      Term.(const (fun url -> make_opts (Cli_command (Protocol.pack Open { url })))
+      Term.(const (fun url -> make_opts (Cli_command (Cli_cmd { cmd = Open; params = { url }; format = format_route_result })))
             $ url $ host_opt $ port_opt $ name_opt)
   in
   let open_on_cmd =
@@ -81,7 +105,7 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "open-on" ~doc)
       Term.(const (fun target url ->
-              make_opts (Cli_command (Protocol.pack Open_on { target; url })))
+              make_opts (Cli_command (Cli_cmd { cmd = Open_on; params = { target; url }; format = format_route_result })))
             $ target $ url $ host_opt $ port_opt $ name_opt)
   in
   let test_cmd =
@@ -91,13 +115,13 @@ let cli_term () =
            & info [] ~docv:"URL" ~doc:"URL to test.")
     in
     Cmd.v (Cmd.info "test" ~doc)
-      Term.(const (fun url -> make_opts (Cli_command (Protocol.pack Test { url })))
+      Term.(const (fun url -> make_opts (Cli_command (Cli_cmd { cmd = Test; params = { url }; format = format_test_result })))
             $ url $ host_opt $ port_opt $ name_opt)
   in
   let get_config_cmd =
     let doc = "Get the current daemon configuration." in
     Cmd.v (Cmd.info "get-config" ~doc)
-      Term.(const (make_opts (Cli_command (Protocol.pack Get_config ())))
+      Term.(const (make_opts (Cli_command (Cli_cmd { cmd = Get_config; params = (); format = fun c -> Yojson.Safe.pretty_to_string (Protocol.config_to_yojson c) })))
             $ host_opt $ port_opt $ name_opt)
   in
   let set_config_cmd =
@@ -108,13 +132,13 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "set-config" ~doc)
       Term.(const (fun json_file ->
-              make_opts (Cli_command (Protocol.pack Set_config (parse_config_file json_file))))
+              make_opts (Cli_command (Cli_cmd { cmd = Set_config; params = parse_config_file json_file; format = fun () -> "OK" })))
             $ json_file $ host_opt $ port_opt $ name_opt)
   in
   let get_rules_cmd =
     let doc = "Get the current routing rules." in
     Cmd.v (Cmd.info "get-rules" ~doc)
-      Term.(const (make_opts (Cli_command (Protocol.pack Get_rules ())))
+      Term.(const (make_opts (Cli_command (Cli_cmd { cmd = Get_rules; params = (); format = fun r -> Yojson.Safe.pretty_to_string (Protocol.rules_to_yojson r) })))
             $ host_opt $ port_opt $ name_opt)
   in
   let set_rules_cmd =
@@ -125,52 +149,19 @@ let cli_term () =
     in
     Cmd.v (Cmd.info "set-rules" ~doc)
       Term.(const (fun json_file ->
-              make_opts (Cli_command (Protocol.pack Set_rules (parse_rules_file json_file))))
+              make_opts (Cli_command (Cli_cmd { cmd = Set_rules; params = parse_rules_file json_file; format = fun () -> "OK" })))
             $ json_file $ host_opt $ port_opt $ name_opt)
   in
   let status_cmd =
     let doc = "Show daemon status." in
     Cmd.v (Cmd.info "status" ~doc)
-      Term.(const (make_opts (Cli_command (Protocol.pack Status ())))
+      Term.(const (make_opts (Cli_command (Cli_cmd { cmd = Status; params = (); format = format_status })))
             $ host_opt $ port_opt $ name_opt)
   in
   Cmd.group (Cmd.info "alloy" ~doc:"Alloy URL routing client")
     [ bridge_cmd; register_cmd; open_cmd; open_on_cmd; test_cmd;
       get_config_cmd; set_config_cmd; get_rules_cmd; set_rules_cmd;
       status_cmd ]
-
-(* Format response as human-readable CLI output *)
-
-let format_route_result = function
-  | Protocol.Local -> "Local"
-  | Protocol.Remote tid -> Printf.sprintf "Remote: %s" tid
-
-let format_test_result = function
-  | Protocol.Match { tenant; rule_index } ->
-    Printf.sprintf "Match: tenant=%s rule=%d" tenant rule_index
-  | Protocol.No_match { default_tenant } ->
-    Printf.sprintf "No match: default=%s" default_tenant
-
-let format_response : type req resp. (req, resp) Protocol.command -> (resp, string) Result.t -> string = fun cmd resp ->
-  match resp with
-  | Error msg -> Printf.sprintf "Error: %s" msg
-  | Ok value ->
-    begin match cmd with
-    | Protocol.Register -> Printf.sprintf "Registered as %s" value
-    | Protocol.Open -> format_route_result value
-    | Protocol.Open_on -> format_route_result value
-    | Protocol.Test -> format_test_result value
-    | Protocol.Get_config ->
-      Yojson.Safe.pretty_to_string (Protocol.config_to_yojson value)
-    | Protocol.Set_config -> "OK"
-    | Protocol.Get_rules ->
-      Yojson.Safe.pretty_to_string (Protocol.rules_to_yojson value)
-    | Protocol.Set_rules -> "OK"
-    | Protocol.Status ->
-      Printf.sprintf "Tenants: %s\nUptime: %ds"
-        (String.concat ~sep:", " value.registered_tenants)
-        value.uptime_seconds
-    end
 
 (* -- Connect to daemon helper *)
 
@@ -187,16 +178,7 @@ let connect_to_daemon ~sw net ~host ~port =
 
 (* -- Send a command to the daemon and get a response (CLI) *)
 
-let send_command_cli :
-    type req resp.
-    net:_ Eio.Net.ty Eio.Resource.t ->
-    tenant:string ->
-    host:string ->
-    port:int ->
-    (req, resp) Protocol.command ->
-    req ->
-    string =
- fun ~net ~tenant ~host ~port cmd params ->
+let send_command_cli ~net ~tenant ~host ~port (Cli_cmd { cmd; params; format }) =
   Eio.Switch.run @@ fun sw ->
   let flow = connect_to_daemon ~sw net ~host ~port in
   let env = Protocol.make_request_envelope cmd params 1 (Some tenant) in
@@ -206,7 +188,10 @@ let send_command_cli :
   match Protocol.deserialize_server_message response_line with
   | Ok (Response resp_env) ->
     (match resp_env.success with
-     | true -> format_response cmd (Protocol.deserialize_response cmd resp_env.payload)
+     | true ->
+       (match Protocol.deserialize_response cmd resp_env.payload with
+        | Ok value -> format value
+        | Error msg -> Printf.sprintf "Response decode error: %s" msg)
      | false -> Printf.sprintf "Error: %s" (Option.value resp_env.error ~default:"unknown"))
   | Ok (Push _) -> "Unexpected push message"
   | Error msg -> Printf.sprintf "Response parse error: %s" msg
@@ -399,9 +384,9 @@ let run_cli { mode; host; port; name } =
   | Bridge -> run_bridge env
   | Register_stream ->
     run_register ~net ~host ~port ~tenant:(resolve_tenant (Unix.gethostname ()))
-  | Cli_command (Request (cmd, params, _)) ->
+  | Cli_command cli_cmd ->
     let tenant = resolve_tenant "default" in
-    let output = send_command_cli ~net ~tenant ~host ~port cmd params in
+    let output = send_command_cli ~net ~tenant ~host ~port cli_cmd in
     print_endline output
 
 let () =

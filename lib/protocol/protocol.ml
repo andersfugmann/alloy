@@ -107,11 +107,6 @@ type (_, _) command =
   | Set_rules : (rule list, unit) command
   | Status : (unit, status_info) command
 
-(* -- Existential wrapper *)
-
-type packed_request =
-  | Request : ('req, 'resp) command * 'req * ('resp -> Yojson.Safe.t) -> packed_request
-
 (* -- Helpers *)
 
 let ( let* ) r f = Result.bind r ~f
@@ -183,49 +178,6 @@ let serialize_params : type req resp. (req, resp) command -> req -> Yojson.Safe.
   | Set_rules -> rules_to_yojson params
   | Status -> `Null
 
-let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
-  | Register -> (fun s -> `String s)
-  | Open -> route_result_to_yojson
-  | Open_on -> route_result_to_yojson
-  | Test -> test_result_to_yojson
-  | Get_config -> config_to_yojson
-  | Set_config -> (fun () -> `Null)
-  | Get_rules -> rules_to_yojson
-  | Set_rules -> (fun () -> `Null)
-  | Status -> status_info_to_yojson
-
-let pack : type req resp. (req, resp) command -> req -> packed_request =
-  fun cmd params -> Request (cmd, params, response_serializer cmd)
-
-let deserialize_request (name : string) (params : Yojson.Safe.t) : (packed_request, string) Result.t =
-  let rs = response_serializer in
-  match name with
-  | "register" ->
-    let* p = register_params_of_yojson params in
-    Ok (Request (Register, p, rs Register))
-  | "open" ->
-    let* p = open_params_of_yojson params in
-    Ok (Request (Open, p, rs Open))
-  | "open_on" ->
-    let* p = open_on_params_of_yojson params in
-    Ok (Request (Open_on, p, rs Open_on))
-  | "test" ->
-    let* p = open_params_of_yojson params in
-    Ok (Request (Test, p, rs Test))
-  | "get_config" ->
-    Ok (Request (Get_config, (), rs Get_config))
-  | "set_config" ->
-    let* c = config_of_yojson params in
-    Ok (Request (Set_config, c, rs Set_config))
-  | "get_rules" ->
-    Ok (Request (Get_rules, (), rs Get_rules))
-  | "set_rules" ->
-    let* r = rules_of_yojson params in
-    Ok (Request (Set_rules, r, rs Set_rules))
-  | "status" ->
-    Ok (Request (Status, (), rs Status))
-  | _ -> Result.failf "unknown command: %s" name
-
 let deserialize_response : type req resp. (req, resp) command -> Yojson.Safe.t -> (resp, string) Result.t =
   fun cmd payload -> match cmd with
   | Register ->
@@ -269,12 +221,16 @@ let deserialize_server_message str =
 
 (* -- Inline expect tests *)
 
-let%expect_test "GADT command round-trip" =
+let%expect_test "request envelope round-trip" =
   let test : type req resp. (req, resp) command -> req -> string -> unit =
     fun cmd params label ->
       let env = make_request_envelope cmd params 0 None in
-      match deserialize_request env.command env.params with
-      | Ok (Request _) -> printf "%s: ok\n" label
+      let json_str = serialize_request_envelope env in
+      match deserialize_request_envelope json_str with
+      | Ok env2 ->
+        (match String.equal env2.command (command_name cmd) with
+         | true -> printf "%s: ok\n" label
+         | false -> printf "%s: FAIL command mismatch\n" label)
       | Error e -> printf "%s: FAIL %s\n" label e
   in
   test Register { brand = Some "Chrome"; address = None; name = None } "register";
@@ -296,10 +252,22 @@ let%expect_test "GADT command round-trip" =
     status: ok
     |}]
 
+(* Test helper: serialize a response for a command *)
+let serialize_response_payload : type req resp. (req, resp) command -> resp -> Yojson.Safe.t = function
+  | Register -> (fun s -> `String s)
+  | Open -> route_result_to_yojson
+  | Open_on -> route_result_to_yojson
+  | Test -> test_result_to_yojson
+  | Get_config -> config_to_yojson
+  | Set_config -> (fun () -> `Null)
+  | Get_rules -> rules_to_yojson
+  | Set_rules -> (fun () -> `Null)
+  | Status -> status_info_to_yojson
+
 let%expect_test "response round-trip" =
   let test : type req resp. (req, resp) command -> resp -> string -> unit =
     fun cmd resp label ->
-      let json = response_serializer cmd resp in
+      let json = serialize_response_payload cmd resp in
       match deserialize_response cmd json with
       | Ok _ -> printf "%s: ok\n" label
       | Error e -> printf "%s: FAIL %s\n" label e
