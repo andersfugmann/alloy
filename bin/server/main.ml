@@ -381,20 +381,14 @@ let dispatch_command state ~tenant (Protocol.Request (cmd, params, resp_to_json)
     let is_reregister = Map.mem state.registry tenant in
     let registry = Map.set state.registry ~key:tenant ~data:connection in
     resolve (Ok tenant);
-    let state = { state with registry } in
-    let state =
-      match is_reregister with
-      | true ->
-        log "tenant %s re-registering (replacing stale connection)" tenant;
-        state
-      | false ->
-        log "tenant %s registered (brand=%s)" tenant
-          (Option.value params.brand ~default:"(none)");
-        state
-        |> fun s -> flush_pending_deliveries s tenant connection
-        |> fun s -> update_tenant_config s tenant params.brand
-    in
-    broadcast_config state
+    (match is_reregister with
+     | true -> log "tenant %s re-registered (replacing stale connection)" tenant
+     | false -> log "tenant %s registered (brand=%s)" tenant
+                  (Option.value params.brand ~default:"(none)"));
+    { state with registry }
+    |> fun s -> flush_pending_deliveries s tenant connection
+    |> fun s -> update_tenant_config s tenant params.brand
+    |> broadcast_config
   | Protocol.Open ->
     let (state, promise) = handle_open state tenant params.url ~sw ~clock ~inbox in
     Eio.Fiber.fork ~sw (fun () ->
