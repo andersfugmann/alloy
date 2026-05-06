@@ -51,6 +51,14 @@ let send_command : type req resp. connection -> (req, resp) Protocol.command -> 
       | true -> on_result (Protocol.response_deserializer cmd resp_env.payload)
       | false -> on_result (Error (Option.value resp_env.error ~default:"unknown error")))
 
+let call : type req resp. connection -> (req, resp) Protocol.command -> req ->
+    connection * (resp, string) Result.t Lwt.t =
+  fun conn cmd request ->
+    let (promise, resolver) = Lwt.wait () in
+    let conn = send_command conn cmd request (fun result ->
+      Lwt.wakeup_later resolver result) in
+    (conn, promise)
+
 (* -- Receiving *)
 
 type incoming =
