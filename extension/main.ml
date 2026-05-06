@@ -2,6 +2,7 @@ open! Base
 open! Stdio
 open Js_of_ocaml
 
+let ( let* ) = Lwt.bind
 let log = Chrome_api.log
 
 (* -- Typed wrappers around Chrome APIs *)
@@ -25,7 +26,8 @@ type native_port = Chrome_api.port
 
 type event =
   | Navigation of { url : string; tab_id : int }
-  | Bridge_message of { raw : string }
+  | Push_received of Protocol.push
+  | Registration_response of { success : bool; payload : Yojson.Safe.t; error : string option }
   | Port_disconnected
   | Connect_requested
   | Connect_with_settings of { port : native_port; tenant_name : string; daemon_host : string; daemon_port : string; debug_logging : bool }
@@ -34,8 +36,6 @@ type event =
   | Setup_menus
   | Refresh_menus of { tenants : (string * string * bool) list }
   | Self_registered of { tenant_id : string }
-  | Delete_rule_at of { index : int }
-  | Apply_set_rules of { rules : Protocol.rule list }
 
 type state = {
   connection : Bridge_protocol.connection option;
@@ -51,7 +51,7 @@ let (event_stream : event Lwt_stream.t), push_event =
 
 let push ev = push_event (Some ev)
 
-(* -- State operations (pure) *)
+(* -- State operations *)
 
 let initial_state = { connection = None; tenant_names = []; self_tenant_id = None; debug_logging = false }
 
@@ -76,30 +76,14 @@ let update_badge (connected : bool) : unit =
       "icons/icon48_disconnected.png"
       "icons/icon128_disconnected.png"
 
-let send_envelope (state : state) (command : string) (params : Yojson.Safe.t)
-    (on_response : Protocol.response_envelope -> unit) : state =
-  match state.connection with
-  | None ->
-    log "No native port connected";
-    on_response { id = 0; success = false; payload = `Null; error = Some "not connected" };
-    state
-  | Some conn ->
-    log (Printf.sprintf "-> %s id=%d" command conn.next_id);
-    let conn = Bridge_protocol.send_envelope conn ~command ~params ~on_response in
-    { state with connection = Some conn }
-
-let send_command : type req resp. state -> (req, resp) Protocol.command -> req ->
-    ((resp, string) Result.t -> unit) -> state =
-  fun state cmd request on_result ->
+let call : type req resp. state -> (req, resp) Protocol.command -> req ->
+    (resp, string) Result.t Lwt.t =
+  fun state cmd request ->
     match state.connection with
-    | None ->
-      log "No native port connected";
-      on_result (Error "not connected");
-      state
+    | None -> Lwt.return (Error "not connected")
     | Some conn ->
       log (Printf.sprintf "-> %s id=%d" (Protocol.command_name cmd) conn.next_id);
-      let conn = Bridge_protocol.send_command conn cmd request on_result in
-      { state with connection = Some conn }
+      Bridge_protocol.call conn cmd request
 
 (* -- Connection management *)
 
@@ -107,6 +91,20 @@ let non_empty (s : string) : string option =
   match String.is_empty s with
   | true -> None
   | false -> Some s
+
+let dispatch_port_message (conn : Bridge_protocol.connection) (raw : string) : unit =
+  match Bridge_protocol.parse_message raw with
+  | Parse_error msg ->
+    log (Printf.sprintf "Failed to parse bridge message: %s" msg)
+  | Push p -> push (Push_received p)
+  | Response { id = 0; envelope } ->
+    push (Registration_response { success = envelope.success; payload = envelope.payload; error = envelope.error })
+  | Response { id; envelope } ->
+    log (Printf.sprintf "← Response id=%d success=%b" id envelope.success);
+    let found = Bridge_protocol.dispatch_response conn id envelope in
+    match found with
+    | false -> log (Printf.sprintf "Orphan response for id=%d" id)
+    | true -> ()
 
 let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
@@ -121,9 +119,10 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     (Option.value name ~default:"(default)")
     (Option.value address ~default:"(default)"));
   let send_raw msg = Chrome_api.Port.post_message_json port msg in
-  let conn = Bridge_protocol.empty_connection ~send_raw in
+  let conn = Bridge_protocol.create ~send_raw in
+  Chrome_api.Port.on_message_json port (fun msg -> dispatch_port_message conn msg);
+  Chrome_api.Port.on_disconnect port (fun () -> push Port_disconnected);
   let state = { connection = Some conn; tenant_names = []; self_tenant_id = None; debug_logging } in
-  (* Register uses id=0: response handled by id=0 handler, not pending map *)
   let register_request : Protocol.register_request = { brand; address; name } in
   let register_env = Protocol.make_request_envelope Register register_request 0 name in
   log "→ Register id=0";
@@ -134,9 +133,6 @@ let connect (_state : state) : state =
   match
     let p = Chrome_api.Runtime.connect_native "alloy" in
     log "Connected to native messaging host";
-    Chrome_api.Port.on_message_json p (fun msg ->
-      push (Bridge_message { raw = msg }));
-    Chrome_api.Port.on_disconnect p (fun () -> push Port_disconnected);
     p
   with
   | p ->
@@ -161,7 +157,7 @@ let connect (_state : state) : state =
     log (Printf.sprintf "Failed to connect: %s" (Exn.to_string exn));
     initial_state
 
-(* -- Event handlers (pure state transformers) *)
+(* -- Event handlers (return state Lwt.t, use let* for commands) *)
 
 let handle_push (state : state) (p : Protocol.push) : state =
   match p with
@@ -182,74 +178,41 @@ let handle_push (state : state) (p : Protocol.push) : state =
     push (Refresh_menus { tenants });
     state
 
-let handle_bridge_message (state : state) (raw : string) : state =
-  match Bridge_protocol.parse_message raw with
-  | Parse_error msg ->
-    log (Printf.sprintf "Failed to parse bridge message: %s" msg);
-    state
-  | Push p -> handle_push state p
-  | Response { id = 0; envelope } ->
-    (* id=0: registration response *)
-    (match envelope.success with
-     | true ->
-       let tenant_id =
-         match envelope.payload with
-         | `String s -> s
-         | _ -> "unknown"
-       in
-       log (Printf.sprintf "← Registered id=0: %s" tenant_id);
-       push (Self_registered { tenant_id });
-       state
-     | false ->
-       log (Printf.sprintf "← Registration error id=0: %s"
-         (Option.value envelope.error ~default:"unknown"));
-       push Port_disconnected;
-       { state with connection = None })
-  | Response { id; envelope } ->
-    log (Printf.sprintf "← Response id=%d success=%b" id envelope.success);
-    match state.connection with
-    | None -> state
-    | Some conn ->
-      let (conn, found) = Bridge_protocol.dispatch_response conn id envelope in
-      (match found with
-       | false -> log (Printf.sprintf "Orphan response for id=%d" id)
-       | true -> ());
-      { state with connection = Some conn }
-
-let handle_navigation (state : state) (url : string) (tab_id : int) : state =
-  match is_connected state with
-  | false -> state
+let handle_navigation (state : state) (url : string) (tab_id : int) : state Lwt.t =
+  match is_connected state && not (is_internal_url url) with
+  | false -> Lwt.return state
   | true ->
-    (match is_internal_url url with
-     | true -> state
-     | false ->
-       let t0 = Chrome_api.performance_now () in
-       debug state (Printf.sprintf "→ Open %s" url);
-       send_command state Open { url } (fun result ->
-           let elapsed = Chrome_api.performance_now () -. t0 in
-           match result with
-           | Ok Protocol.Local ->
-             debug state (Printf.sprintf "← Local (%.1f ms) %s" elapsed url)
-           | Ok (Remote tid) ->
-             debug state (Printf.sprintf "← Remote %s (%.1f ms) %s" tid elapsed url);
-             Chrome_api.Tabs.remove tab_id
-           | Error msg -> log (Printf.sprintf "Open error: %s" msg)))
+    let t0 = Chrome_api.performance_now () in
+    debug state (Printf.sprintf "→ Open %s" url);
+    let* result = call state Open { url } in
+    let elapsed = Chrome_api.performance_now () -. t0 in
+    (match result with
+     | Ok Protocol.Local ->
+       debug state (Printf.sprintf "← Local (%.1f ms) %s" elapsed url)
+     | Ok (Remote tid) ->
+       debug state (Printf.sprintf "← Remote %s (%.1f ms) %s" tid elapsed url);
+       Chrome_api.Tabs.remove tab_id
+     | Error msg -> log (Printf.sprintf "Open error: %s" msg));
+    Lwt.return state
 
 let handle_context_menu (state : state) (menu_id : string)
-    (link_url : string) (page_url : string) (tab_id : int option) : state =
+    (link_url : string) (page_url : string) (tab_id : int option) : state Lwt.t =
   match String.lsplit2 menu_id ~on:':' with
   | Some ("open_in", target) ->
     (match String.is_empty link_url with
-     | true -> state
+     | true -> Lwt.return state
      | false ->
-       send_command state Open_on { target; url = link_url }
-         (fun _result -> ()))
+       let* _result = call state Open_on { target; url = link_url } in
+       Lwt.return state)
   | Some ("send_to", target) ->
     (match String.is_empty page_url with
-     | true -> state
+     | true -> Lwt.return state
      | false ->
-       send_command state Open_on { target; url = page_url }
-         (fun _result -> Option.iter tab_id ~f:Chrome_api.Tabs.remove))
+       let* result = call state Open_on { target; url = page_url } in
+       (match result with
+        | Ok _ -> Option.iter tab_id ~f:Chrome_api.Tabs.remove
+        | Error _ -> ());
+       Lwt.return state)
   | _ ->
   let url =
     match String.is_empty link_url with
@@ -259,7 +222,7 @@ let handle_context_menu (state : state) (menu_id : string)
   match menu_id with
   | "add_rule" ->
     (match String.is_empty url with
-     | true -> state
+     | true -> Lwt.return state
      | false ->
        let encoded_url =
          url |> Js.string |> Js.encodeURIComponent |> Js.to_string
@@ -269,28 +232,38 @@ let handle_context_menu (state : state) (menu_id : string)
        in
        Chrome_api.Windows.create_popup ~url:dialog_url
          ~width:Constants.popup_width ~height:Constants.popup_height;
-       state)
+       Lwt.return state)
   | "delete_rule" ->
     (match String.is_empty url with
-     | true -> state
+     | true -> Lwt.return state
      | false ->
-       send_command state Test { url } (fun result ->
-           match result with
-           | Ok (Protocol.Match { rule_index; _ }) ->
-             push (Delete_rule_at { index = rule_index })
-           | Ok (No_match _) ->
-             log (Printf.sprintf "No rule matches %s" url)
-           | Error msg ->
-             log (Printf.sprintf "Test error: %s" msg)))
-  | _ -> state
+       let* result = call state Test { url } in
+       match result with
+       | Ok (Protocol.Match { rule_index; _ }) ->
+         let* rules_result = call state Get_rules () in
+         (match rules_result with
+          | Ok existing ->
+            let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
+            let* _set_result = call state Set_rules updated in
+            Lwt.return state
+          | Error msg ->
+            log (Printf.sprintf "Failed to fetch rules: %s" msg);
+            Lwt.return state)
+       | Ok (No_match _) ->
+         log (Printf.sprintf "No rule matches %s" url);
+         Lwt.return state
+       | Error msg ->
+         log (Printf.sprintf "Test error: %s" msg);
+         Lwt.return state)
+  | _ -> Lwt.return state
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
-    (respond : Yojson.Safe.t -> unit) : state =
+    (respond : Yojson.Safe.t -> unit) : state Lwt.t =
   match Bridge_protocol.string_field json "action" with
   | Ok "reconnect" ->
     let state = connect state in
     respond (`Assoc [ ("connected", `Bool (is_connected state)) ]);
-    state
+    Lwt.return state
   | Ok "delete_matching_rule" ->
     let url =
       match Bridge_protocol.string_field json "url" with
@@ -300,28 +273,37 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
     (match String.is_empty url with
      | true ->
        respond (`Assoc [ ("error", `String "url required") ]);
-       state
+       Lwt.return state
      | false ->
-       send_command state Test { url } (fun result ->
-           match result with
-           | Ok (Protocol.Match { rule_index; _ }) ->
-             push (Delete_rule_at { index = rule_index });
-             respond (`Assoc [ ("ok", `Bool true) ])
-           | Ok (No_match _) ->
-             respond (`Assoc [ ("error", `String "No matching rule") ])
+       let* result = call state Test { url } in
+       (match result with
+        | Ok (Protocol.Match { rule_index; _ }) ->
+          let* rules_result = call state Get_rules () in
+          (match rules_result with
+           | Ok existing ->
+             let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
+             let* _set_result = call state Set_rules updated in
+             respond (`Assoc [ ("ok", `Bool true) ]);
+             Lwt.return state
            | Error msg ->
-             respond (`Assoc [ ("error", `String msg) ])))
+             respond (`Assoc [ ("error", `String msg) ]);
+             Lwt.return state)
+        | Ok (No_match _) ->
+          respond (`Assoc [ ("error", `String "No matching rule") ]);
+          Lwt.return state
+        | Error msg ->
+          respond (`Assoc [ ("error", `String msg) ]);
+          Lwt.return state))
   | Ok other ->
     log (Printf.sprintf "Unknown popup action: %s" other);
     respond (`Assoc [ ("error", `String "unknown action") ]);
-    state
+    Lwt.return state
   | Error _ ->
     respond (`Assoc [ ("error", `String "invalid message") ]);
-    state
+    Lwt.return state
 
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
-    (respond : Yojson.Safe.t -> unit) : state =
-  (* Protocol command passthrough: {"cmd": "<command>", "params": <json>} *)
+    (respond : Yojson.Safe.t -> unit) : state Lwt.t =
   match Bridge_protocol.string_field json "cmd" with
   | Error _ -> handle_local_action state json respond
   | Ok cmd_name ->
@@ -333,10 +315,14 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
     match is_connected state with
     | false ->
       respond (`Assoc [ ("success", `Bool false); ("error", `String "Not connected") ]);
-      state
+      Lwt.return state
     | true ->
-      send_envelope state cmd_name params_json (fun resp_env ->
-        respond (Protocol.response_envelope_to_yojson resp_env))
+      match state.connection with
+      | None -> Lwt.return state
+      | Some conn ->
+        let* resp_env = Bridge_protocol.send_raw_envelope conn ~command:cmd_name ~params:params_json in
+        respond (Protocol.response_envelope_to_yojson resp_env);
+        Lwt.return state
 
 let setup_context_menus (tenants : (string * string * bool) list) (self_id : string option) : unit =
   remove_all_context_menus (fun () ->
@@ -360,51 +346,49 @@ let setup_context_menus (tenants : (string * string * bool) list) (self_id : str
     create_context_menu ~id:"add_rule" ~title:"Add rule" ~contexts:[ "page"; "link" ];
     create_context_menu ~id:"delete_rule" ~title:"Delete matching rule" ~contexts:[ "page"; "link" ])
 
-let handle_delete_rule_at (state : state) (index : int) : state =
-  send_command state Get_rules () (fun result ->
-      match result with
-      | Ok existing ->
-        let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i index)) in
-        push (Apply_set_rules { rules = updated })
-      | Error msg ->
-        log (Printf.sprintf "Failed to fetch rules: %s" msg))
-
-let handle_event (state : state) (event : event) : state =
+let handle_event (state : state) (event : event) : state Lwt.t =
   match event with
   | Navigation { url; tab_id } -> handle_navigation state url tab_id
-  | Bridge_message { raw } -> handle_bridge_message state raw
+  | Push_received p -> Lwt.return (handle_push state p)
+  | Registration_response { success; payload; error } ->
+    (match success with
+     | true ->
+       let tenant_id =
+         match payload with
+         | `String s -> s
+         | _ -> "unknown"
+       in
+       log (Printf.sprintf "← Registered id=0: %s" tenant_id);
+       Lwt.return { state with self_tenant_id = Some tenant_id }
+     | false ->
+       log (Printf.sprintf "← Registration error id=0: %s"
+         (Option.value error ~default:"unknown"));
+       Lwt.return { state with connection = None })
   | Port_disconnected ->
     log "Native port disconnected, reconnecting in 2s…";
     Chrome_api.set_timeout (fun () -> push Connect_requested) Constants.reconnect_delay_ms;
-    { initial_state with debug_logging = state.debug_logging }
-  | Connect_requested -> connect state
+    Lwt.return { initial_state with debug_logging = state.debug_logging }
+  | Connect_requested -> Lwt.return (connect state)
   | Connect_with_settings { port; tenant_name; daemon_host; daemon_port; debug_logging } ->
-    connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging
+    Lwt.return (connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging)
   | Context_menu { menu_id; link_url; page_url; tab_id } ->
     handle_context_menu state menu_id link_url page_url tab_id
   | Popup_query { json; respond } -> handle_popup_query state json respond
   | Setup_menus ->
     setup_context_menus state.tenant_names state.self_tenant_id;
-    state
+    Lwt.return state
   | Refresh_menus { tenants } ->
     setup_context_menus tenants state.self_tenant_id;
-    { state with tenant_names = tenants }
+    Lwt.return { state with tenant_names = tenants }
   | Self_registered { tenant_id } ->
     log (Printf.sprintf "Registered as tenant: %s" tenant_id);
-    { state with self_tenant_id = Some tenant_id }
-  | Delete_rule_at { index } ->
-    handle_delete_rule_at state index
-  | Apply_set_rules { rules } ->
-    send_command state Set_rules rules (fun result ->
-        match result with
-        | Ok () -> log "Set rules succeeded"
-        | Error msg -> log (Printf.sprintf "Set rules error: %s" msg))
+    Lwt.return { state with self_tenant_id = Some tenant_id }
 
 (* -- Coordinator loop *)
 
 let rec coordinator (state : state) : unit Lwt.t =
-  let%lwt event = Lwt_stream.next event_stream in
-  let state = handle_event state event in
+  let* event = Lwt_stream.next event_stream in
+  let* state = handle_event state event in
   update_badge (Option.is_some state.self_tenant_id);
   coordinator state
 

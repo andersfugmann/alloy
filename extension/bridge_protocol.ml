@@ -1,6 +1,8 @@
 open! Base
 open! Stdio
 
+let ( let* ) = Lwt.bind
+
 (* -- JSON utilities *)
 
 let json_of_string (s : string) : (Yojson.Safe.t, string) Result.t =
@@ -18,46 +20,38 @@ let string_field (json : Yojson.Safe.t) (key : string) : (string, string) Result
      | None -> Error (Printf.sprintf "missing field: %s" key))
   | _ -> Error "expected JSON object"
 
-(* -- Connection state *)
+(* -- Connection state (mutable: shared between caller and port handler) *)
 
 type connection = {
-  next_id : int;
-  pending : (Protocol.response_envelope -> unit) Map.M(Int).t;
+  mutable next_id : int;
+  mutable pending : (Protocol.response_envelope Lwt.u) Map.M(Int).t;
   send_raw : string -> unit;
 }
 
-let empty_connection ~send_raw =
+let create ~send_raw =
   { next_id = 1; pending = Map.empty (module Int); send_raw }
 
 (* -- Sending *)
 
-let send_envelope (conn : connection) ~(command : string)
-    ~(params : Yojson.Safe.t)
-    ~(on_response : Protocol.response_envelope -> unit) : connection =
+let send_raw_envelope (conn : connection) ~(command : string)
+    ~(params : Yojson.Safe.t) : Protocol.response_envelope Lwt.t =
   let id = conn.next_id in
   let env : Protocol.request_envelope = { id; command; params; tenant = None } in
+  let (promise, resolver) = Lwt.wait () in
+  conn.next_id <- id + 1;
+  conn.pending <- Map.set conn.pending ~key:id ~data:resolver;
   conn.send_raw (json_to_string (Protocol.request_envelope_to_yojson env));
-  { conn with
-    next_id = id + 1;
-    pending = Map.set conn.pending ~key:id ~data:on_response }
-
-let send_command : type req resp. connection -> (req, resp) Protocol.command -> req ->
-    ((resp, string) Result.t -> unit) -> connection =
-  fun conn cmd request on_result ->
-    let command = Protocol.command_name cmd in
-    let params = Protocol.request_serializer cmd request in
-    send_envelope conn ~command ~params ~on_response:(fun resp_env ->
-      match resp_env.success with
-      | true -> on_result (Protocol.response_deserializer cmd resp_env.payload)
-      | false -> on_result (Error (Option.value resp_env.error ~default:"unknown error")))
+  promise
 
 let call : type req resp. connection -> (req, resp) Protocol.command -> req ->
-    connection * (resp, string) Result.t Lwt.t =
+    (resp, string) Result.t Lwt.t =
   fun conn cmd request ->
-    let (promise, resolver) = Lwt.wait () in
-    let conn = send_command conn cmd request (fun result ->
-      Lwt.wakeup_later resolver result) in
-    (conn, promise)
+    let command = Protocol.command_name cmd in
+    let params = Protocol.request_serializer cmd request in
+    let* resp_env = send_raw_envelope conn ~command ~params in
+    match resp_env.success with
+    | true -> Lwt.return (Protocol.response_deserializer cmd resp_env.payload)
+    | false -> Lwt.return (Error (Option.value resp_env.error ~default:"unknown error"))
 
 (* -- Receiving *)
 
@@ -76,9 +70,10 @@ let parse_message (raw : string) : incoming =
     | Error msg -> Parse_error (Printf.sprintf "invalid message: %s" msg)
 
 let dispatch_response (conn : connection) (id : int)
-    (envelope : Protocol.response_envelope) : connection * bool =
+    (envelope : Protocol.response_envelope) : bool =
   match Map.find conn.pending id with
-  | None -> (conn, false)
-  | Some cb ->
-    cb envelope;
-    ({ conn with pending = Map.remove conn.pending id }, true)
+  | None -> false
+  | Some resolver ->
+    conn.pending <- Map.remove conn.pending id;
+    Lwt.wakeup_later resolver envelope;
+    true
