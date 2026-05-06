@@ -19,20 +19,20 @@ let send_message (msg : Yojson.Safe.t)
 let send_protocol_command : type req resp. (req, resp) Protocol.command -> req ->
     on_response:((resp, string) Result.t -> unit) -> unit =
   fun cmd params ~on_response ->
-    let msg = `Assoc [
-      ("cmd", `String (Protocol.command_name cmd));
-      ("params", Protocol.request_serializer cmd params);
-    ] in
+    let frame = Protocol.make_request_frame cmd params 0 None in
+    let msg = Protocol.frame_to_yojson frame in
     send_message msg ~on_response:(fun result ->
       match result with
       | Error e -> on_response (Error e)
       | Ok json ->
-        match Protocol.response_envelope_of_yojson json with
-        | Error msg -> on_response (Error msg)
-        | Ok env ->
-          match env.success with
-          | true -> on_response (Protocol.response_deserializer cmd env.payload)
-          | false -> on_response (Error (Option.value env.error ~default:"unknown error")))
+        let parsed =
+          Result.bind (Protocol.frame_of_yojson json) ~f:(fun frame ->
+            match Protocol.parse_response_payload frame with
+            | Ok (Protocol.Success payload) -> Protocol.response_deserializer cmd payload
+            | Ok (Protocol.Failure msg) -> Error msg
+            | Error msg -> Error msg)
+        in
+        on_response parsed)
 
 let storage_get (keys : string list)
     ~(on_result : (string * string) list -> unit) : unit =

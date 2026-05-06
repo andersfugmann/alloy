@@ -181,37 +181,45 @@ let connect_to_daemon ~sw net ~host ~port =
 let send_command_cli ~net ~tenant ~host ~port (Cli_cmd { cmd; params; format }) =
   Eio.Switch.run @@ fun sw ->
   let flow = connect_to_daemon ~sw net ~host ~port in
-  let env = Protocol.make_request_envelope cmd params 1 (Some tenant) in
-  Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
+  let frame = Protocol.make_request_frame cmd params 1 (Some tenant) in
+  Eio.Flow.copy_string (Protocol.serialize_frame frame ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let response_line = Eio.Buf_read.line reader in
-  match Protocol.deserialize_server_message response_line with
-  | Ok (Response resp_env) ->
-    (match resp_env.success with
-     | true ->
-       (match Protocol.response_deserializer cmd resp_env.payload with
-        | Ok value -> format value
-        | Error msg -> Printf.sprintf "Response decode error: %s" msg)
-     | false -> Printf.sprintf "Error: %s" (Option.value resp_env.error ~default:"unknown"))
-  | Ok (Push _) -> "Unexpected push message"
-  | Error msg -> Printf.sprintf "Response parse error: %s" msg
+  let ( let* ) r f = Result.bind r ~f in
+  let result =
+    let* frame = Protocol.deserialize_frame response_line in
+    let* rp = Protocol.parse_response_payload frame in
+    match rp with
+    | Protocol.Success json -> Protocol.response_deserializer cmd json
+    | Protocol.Failure msg -> Error msg
+  in
+  match result with
+  | Ok value -> format value
+  | Error msg -> Printf.sprintf "Error: %s" msg
 
 (* -- CLI register: stay connected, print pushes *)
+
+let parse_push line =
+  let ( let* ) r f = Result.bind r ~f in
+  let* frame = Protocol.deserialize_frame line in
+  match frame.id with
+  | 0 -> Protocol.parse_push_payload frame
+  | _ -> Error "unexpected non-push message"
 
 let run_register ~net ~host ~port ~tenant =
   Eio.Switch.run @@ fun sw ->
   let flow =
     connect_to_daemon ~sw net ~host ~port
   in
-  let env = Protocol.make_request_envelope Register { brand = None; address = None; name = None } 0 (Some tenant) in
-  Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
+  let frame = Protocol.make_request_frame Register { brand = None; address = None; name = None } 0 (Some tenant) in
+  Eio.Flow.copy_string (Protocol.serialize_frame frame ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let first_line = Eio.Buf_read.line reader in
-  (match Protocol.deserialize_server_message first_line with
-   | Ok (Push { id = _; push = Registered { tenant_id } }) ->
+  (match parse_push first_line with
+   | Ok (Registered { tenant_id }) ->
      printf "Registered as %s\n%!" tenant_id
    | Ok _ ->
-     eprintf "Unexpected message during registration\n%!";
+     eprintf "Unexpected push during registration\n%!";
      Stdlib.exit 1
    | Error msg ->
      eprintf "Registration parse error: %s\n%!" msg;
@@ -219,16 +227,14 @@ let run_register ~net ~host ~port ~tenant =
   let rec read_loop () =
     match Eio.Buf_read.line reader with
     | line ->
-      (match Protocol.deserialize_server_message line with
-       | Ok (Push { id = _; push = Navigate { url } }) ->
+      (match parse_push line with
+       | Ok (Navigate { url }) ->
          printf "NAVIGATE %s\n%!" url
-       | Ok (Push { id = _; push = Config_updated { config = cfg; registered_tenants } }) ->
+       | Ok (Config_updated { config = cfg; registered_tenants }) ->
          printf "CONFIG_UPDATED tenants=%d registered=%d\n%!"
            (List.length cfg.tenants) (List.length registered_tenants)
-       | Ok (Push { id = _; push = Registered { tenant_id } }) ->
+       | Ok (Registered { tenant_id }) ->
          printf "RE-REGISTERED %s\n%!" tenant_id
-       | Ok (Response _) ->
-         eprintf "Unexpected response in register stream\n%!"
        | Error msg ->
          eprintf "Parse error: %s\n%!" msg);
       read_loop ()
@@ -278,19 +284,30 @@ let run_bridge env =
   let stdout_stream = Eio.Stream.create Constants.bridge_stream_capacity in
   (* Wait for a valid Register request; reject anything else *)
   let err_not_registered id =
-    Protocol.serialize_server_message
-      (Response (Protocol.make_response_envelope id (Error "Not connected. Send Register first")))
+    Protocol.make_response_frame id (Error "Not connected. Send Register first")
+    |> Protocol.serialize_frame
   in
   let rec await_register () =
     match read_native_message stdin_flow with
     | None -> None
     | Some json ->
-      (match Protocol.request_envelope_of_yojson json with
-       | Ok env ->
-         (match String.equal env.command "register" with
+      match Protocol.frame_of_yojson json with
+      | Error _ ->
+        Eio.Stream.add stdout_stream (err_not_registered 0);
+        await_register ()
+      | Ok frame ->
+        match Protocol.parse_request_payload frame with
+        | Error _ ->
+          Eio.Stream.add stdout_stream (err_not_registered frame.id);
+          await_register ()
+        | Ok rp ->
+          match String.equal rp.command "register" with
+          | false ->
+            Eio.Stream.add stdout_stream (err_not_registered frame.id);
+            await_register ()
           | true ->
             let (name, address, brand) =
-              match Protocol.register_request_of_yojson env.params with
+              match Protocol.register_request_of_yojson rp.params with
               | Ok p -> (p.name, p.address, p.brand)
               | Error _ -> (None, None, None)
             in
@@ -300,14 +317,8 @@ let run_bridge env =
               address = None;
               name = Some tenant;
             } in
-            let patched_env = Protocol.make_request_envelope Register patched_request 0 (Some tenant) in
-            Some (tenant, address, Protocol.serialize_request_envelope patched_env)
-          | false ->
-            Eio.Stream.add stdout_stream (err_not_registered env.id);
-            await_register ())
-       | Error _ ->
-         Eio.Stream.add stdout_stream (err_not_registered 0);
-         await_register ())
+            let patched_frame = Protocol.make_request_frame Register patched_request 0 (Some tenant) in
+            Some (tenant, address, Protocol.serialize_frame patched_frame)
   in
   match await_register () with
   | None -> ()

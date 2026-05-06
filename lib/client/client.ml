@@ -24,12 +24,12 @@ type outgoing = Outgoing : {
 
 type command =
   | Typed of outgoing
-  | Raw of { command : string; params : Yojson.Safe.t; resolver : Protocol.response_envelope Lwt.u }
+  | Raw of { command : string; params : Yojson.Safe.t; resolver : Protocol.frame Lwt.u }
 
 type loop_state = {
   next_id : int;
   pending : pending_entry Map.M(Int).t;
-  raw_pending : (Protocol.response_envelope Lwt.u) Map.M(Int).t;
+  raw_pending : Protocol.frame Lwt.u Map.M(Int).t;
 }
 
 (* -- Connection (opaque to caller) *)
@@ -43,35 +43,44 @@ type connection = {
 
 type incoming_msg =
   | Server_push of Protocol.push
-  | Response of { id : int; envelope : Protocol.response_envelope }
+  | Response of { id : int; result : (Yojson.Safe.t, string) Result.t }
   | Parse_error of string
 
+let parse_frame_payload (frame : Protocol.frame) : incoming_msg =
+  match frame.id with
+  | 0 ->
+    begin match Protocol.parse_push_payload frame with
+    | Ok push -> Server_push push
+    | Error msg -> Parse_error (Printf.sprintf "invalid push: %s" msg)
+    end
+  | _ ->
+    match Protocol.parse_response_payload frame with
+    | Ok (Protocol.Success json) -> Response { id = frame.id; result = Ok json }
+    | Ok (Protocol.Failure msg) -> Response { id = frame.id; result = Error msg }
+    | Error msg -> Parse_error (Printf.sprintf "invalid response: %s" msg)
+
 let parse_message (raw : string) : incoming_msg =
-  match Protocol.parse_json_string raw with
-  | Error msg -> Parse_error (Printf.sprintf "invalid JSON: %s" msg)
-  | Ok json ->
-    match Protocol.server_message_of_yojson json with
-    | Ok (Push { id = _; push }) -> Server_push push
-    | Ok (Response env) -> Response { id = env.id; envelope = env }
-    | Error msg -> Parse_error (Printf.sprintf "invalid message: %s" msg)
+  match Protocol.deserialize_frame raw with
+  | Error msg -> Parse_error (Printf.sprintf "invalid frame: %s" msg)
+  | Ok frame -> parse_frame_payload frame
 
 (* -- Connection thread *)
 
 let dispatch_pending (state : loop_state) (id : int)
-    (envelope : Protocol.response_envelope) : loop_state =
+    (result : (Yojson.Safe.t, string) Result.t) : loop_state =
   match Map.find state.pending id with
   | Some (Entry { cmd; resolver }) ->
-    let result =
-      match envelope.success with
-      | true -> Protocol.response_deserializer cmd envelope.payload
-      | false -> Error (Option.value envelope.error ~default:"unknown error")
+    let typed_result =
+      match result with
+      | Ok json -> Protocol.response_deserializer cmd json
+      | Error msg -> Error msg
     in
-    Lwt.wakeup_later resolver result;
+    Lwt.wakeup_later resolver typed_result;
     { state with pending = Map.remove state.pending id }
   | None ->
     match Map.find state.raw_pending id with
     | Some resolver ->
-      Lwt.wakeup_later resolver envelope;
+      Lwt.wakeup_later resolver (Protocol.make_response_frame id result);
       { state with raw_pending = Map.remove state.raw_pending id }
     | None -> state
 
@@ -82,27 +91,22 @@ let handle_incoming (state : loop_state) (raw : string)
   | Server_push p ->
     push_event (Some (Push p));
     state
-  | Response { id; envelope } ->
-    dispatch_pending state id envelope
+  | Response { id; result } ->
+    dispatch_pending state id result
 
 let handle_command (state : loop_state) (cmd : command)
     ~(write : string -> unit) : loop_state =
   let id = state.next_id in
   match cmd with
   | Typed (Outgoing { cmd = c; request; resolver }) ->
-    let env : Protocol.request_envelope = {
-      id;
-      command = Protocol.command_name c;
-      params = Protocol.request_serializer c request;
-      tenant = None;
-    } in
-    write (Protocol.json_to_string (Protocol.request_envelope_to_yojson env));
+    let frame = Protocol.make_request_frame c request id None in
+    write (Protocol.serialize_frame frame);
     { next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver });
       raw_pending = state.raw_pending }
   | Raw { command; params; resolver } ->
-    let env : Protocol.request_envelope = { id; command; params; tenant = None } in
-    write (Protocol.json_to_string (Protocol.request_envelope_to_yojson env));
+    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant:None in
+    write (Protocol.serialize_frame frame);
     { next_id = id + 1;
       pending = state.pending;
       raw_pending = Map.set state.raw_pending ~key:id ~data:resolver }
@@ -139,8 +143,8 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
   let (event_stream, push_event) = Lwt_stream.create () in
   (* Send registration as id=0, fire-and-forget *)
   let register_req : Protocol.register_request = { brand; address = None; name } in
-  let register_env = Protocol.make_request_envelope Register register_req 0 tenant in
-  write (Protocol.json_to_string (Protocol.request_envelope_to_yojson register_env));
+  let frame = Protocol.make_request_frame Register register_req 0 tenant in
+  write (Protocol.serialize_frame frame);
   (* Wait for Registered push to learn assigned tenant name *)
   let rec await_registered () =
     let* raw = Lwt_stream.next read in
@@ -172,7 +176,7 @@ let call : type req resp. connection -> (req, resp) Protocol.command -> req ->
     promise
 
 let send_raw_command (conn : connection) ~(command : string)
-    ~(params : Yojson.Safe.t) : Protocol.response_envelope Lwt.t =
+    ~(params : Yojson.Safe.t) : Protocol.frame Lwt.t =
   let (promise, resolver) = Lwt.wait () in
   conn.push_command (Some (Raw { command; params; resolver }));
   promise

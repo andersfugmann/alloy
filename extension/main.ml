@@ -283,21 +283,19 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
 
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state Lwt.t =
-  match string_field json "cmd" with
+  let parsed =
+    Result.bind (Protocol.frame_of_yojson json) ~f:Protocol.parse_request_payload
+  in
+  match parsed with
   | Error _ -> handle_local_action state json respond
-  | Ok cmd_name ->
-    let params_json =
-      match Yojson.Safe.Util.member "params" json with
-      | `Null -> `Assoc []
-      | p -> p
-    in
+  | Ok rp ->
     match state.connection with
     | None ->
-      respond (`Assoc [ ("success", `Bool false); ("error", `String "Not connected") ]);
+      respond (Protocol.frame_to_yojson (Protocol.make_response_frame 0 (Error "Not connected")));
       Lwt.return state
     | Some conn ->
-      let* resp_env = Client.send_raw_command conn ~command:cmd_name ~params:params_json in
-      respond (Protocol.response_envelope_to_yojson resp_env);
+      let* resp_frame = Client.send_raw_command conn ~command:rp.Protocol.command ~params:rp.params in
+      respond (Protocol.frame_to_yojson resp_frame);
       Lwt.return state
 
 let setup_context_menus (tenants : (string * string * bool) list) (self_id : string option) : unit =

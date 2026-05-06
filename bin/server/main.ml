@@ -219,8 +219,8 @@ let launch_browser cmd =
 let deliver_url state target url ~sw ~clock ~inbox =
   match Map.find state.registry target with
   | Some conn ->
-    let push_msg = Protocol.Push { id = 0; push = Navigate { url } } in
-    (match try_push conn (Protocol.serialize_server_message push_msg) with
+    let push_str = Protocol.serialize_frame (Protocol.make_push_frame (Navigate { url })) in
+    (match try_push conn push_str with
      | true ->
        (state, Eio.Promise.create_resolved (Ok (Protocol.Remote target)))
      | false ->
@@ -282,8 +282,7 @@ let try_save_rules state =
 let broadcast_config (state : state) : state =
   let registered = Map.keys state.registry in
   let push = Protocol.Config_updated { config = state.config; registered_tenants = registered } in
-  let msg = Protocol.Push { id = 0; push } in
-  let s = Protocol.serialize_server_message msg in
+  let s = Protocol.serialize_frame (Protocol.make_push_frame push) in
   let registry =
     Map.filter state.registry ~f:(fun conn ->
       match try_push conn s with
@@ -299,8 +298,8 @@ let flush_pending_deliveries state tenant conn =
   | None -> state
   | Some sentinel ->
     List.iter sentinel.pending ~f:(fun pd ->
-      let push_msg = Protocol.Push { id = 0; push = Navigate { url = pd.url } } in
-      let _delivered = try_push conn (Protocol.serialize_server_message push_msg) in
+      let push_str = Protocol.serialize_frame (Protocol.make_push_frame (Navigate { url = pd.url })) in
+      let _delivered = try_push conn push_str in
       Eio.Promise.resolve pd.reply (Ok (Protocol.Remote tenant));
       log "delivered pending URL to %s: %s" tenant pd.url);
     let starting = List.Assoc.remove state.starting ~equal:String.equal tenant in
@@ -335,8 +334,8 @@ let update_tenant_config state tenant brand =
 let handle_register params env ~respond:_ =
   let registry = Map.set env.state.registry ~key:env.tenant ~data:env.connection in
   (* Send Registered push instead of response (registration is fire-and-forget) *)
-  let push_msg = Protocol.Push { id = 0; push = Registered { tenant_id = env.tenant } } in
-  Eio.Stream.add env.connection.push_stream (Protocol.serialize_server_message push_msg);
+  let push_str = Protocol.serialize_frame (Protocol.make_push_frame (Registered { tenant_id = env.tenant })) in
+  Eio.Stream.add env.connection.push_stream push_str;
   log "tenant %s registered (brand=%s)" env.tenant (Option.value params.Protocol.brand ~default:"(none)");
   { env.state with registry }
   |> fun s -> flush_pending_deliveries s env.tenant env.connection
@@ -437,8 +436,8 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
 (* -- Response formatting *)
 
 let serialize_response id result =
-  Protocol.Response (Protocol.make_response_envelope id result)
-  |> Protocol.serialize_server_message
+  Protocol.make_response_frame id result
+  |> Protocol.serialize_frame
 
 (* -- Generic executor: no GADT matching *)
 
@@ -494,23 +493,28 @@ let rec receive_requests ~tenant inbox connection reader =
   | exception End_of_file -> tenant
   | exception Eio.Io _ -> tenant
   | line ->
-    match Protocol.deserialize_request_envelope line with
+    let result =
+      Result.bind (Protocol.deserialize_frame line) ~f:(fun frame ->
+        Protocol.parse_request_payload frame
+        |> Result.map ~f:(fun rp -> (frame, rp)))
+    in
+    match result with
     | Error msg ->
       log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
       receive_requests ~tenant inbox connection reader
-    | Ok env ->
-      let tenant_name = Option.value (Option.first_some env.tenant tenant) ~default:"anonymous" in
-      log "req[%s]: id=%d %s" tenant_name env.id env.command;
-      match lookup_handler env.command with
+    | Ok (frame, rp) ->
+      let tenant_name = Option.value (Option.first_some frame.tenant tenant) ~default:"anonymous" in
+      log "req[%s]: id=%d %s" tenant_name frame.id rp.command;
+      match lookup_handler rp.command with
       | Error msg ->
         log "req[%s]: command error: %s" tenant_name msg;
-        let response = serialize_response env.id (Error msg) in
+        let response = serialize_response frame.id (Error msg) in
         Eio.Stream.add connection.push_stream response;
         receive_requests ~tenant inbox connection reader
       | Ok handler ->
-        Eio.Stream.add inbox { sender = tenant_name; action = Dispatch { handler; request_json = env.params; request_id = env.id; connection } };
+        Eio.Stream.add inbox { sender = tenant_name; action = Dispatch { handler; request_json = rp.params; request_id = frame.id; connection } };
         let tenant =
-          match String.equal env.command "register" with
+          match String.equal rp.command "register" with
           | true -> Some tenant_name
           | false -> tenant
         in
