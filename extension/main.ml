@@ -102,14 +102,9 @@ let non_empty (s : string) : string option =
   | true -> None
   | false -> Some s
 
-let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
+let connect_with_settings (port : native_port) (tenant_name : string) (_daemon_host : string) (_daemon_port : string) ~(debug_logging : bool) : state =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
   let name = non_empty tenant_name in
-  let _address =
-    let h = Option.value (non_empty daemon_host) ~default:"127.0.0.1" in
-    let p = Option.value (non_empty daemon_port) ~default:(Int.to_string Constants.default_port) in
-    Some (Printf.sprintf "%s:%s" h p)
-  in
   log (Printf.sprintf "Browser brand: %s, tenant: %s"
     (Option.value brand ~default:"(none)")
     (Option.value name ~default:"(default)"));
@@ -165,9 +160,10 @@ let handle_push (state : state) (p : Protocol.push) : state =
     log (Printf.sprintf "Received NAVIGATE push: %s" url);
     create_tab url;
     state
-  | Registered { tenant_id } ->
-    log (Printf.sprintf "Re-registered as tenant: %s" tenant_id);
-    { state with self_tenant_id = Some tenant_id }
+  | Registered _ ->
+    (* Client.init consumes the Registered push; this is unreachable
+       unless the server re-registers mid-session *)
+    state
   | Config_updated { config = cfg; registered_tenants } ->
     log (Printf.sprintf "Config push: %d tenants, %d registered"
       (List.length cfg.tenants) (List.length registered_tenants));
@@ -193,6 +189,21 @@ let handle_navigation (state : state) (url : string) (tab_id : int) : state Lwt.
        Chrome_api.Tabs.remove tab_id
      | Error msg -> log (Printf.sprintf "Open error: %s" msg));
     Lwt.return state
+
+let delete_matching_rule (state : state) (url : string)
+    : (unit, string) Result.t Lwt.t =
+  let* result = call state Test { url } in
+  match result with
+  | Ok (Protocol.Match { rule_index; _ }) ->
+    let* rules_result = call state Get_rules () in
+    (match rules_result with
+     | Ok existing ->
+       let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
+       let* _set_result = call state Set_rules updated in
+       Lwt.return (Ok ())
+     | Error msg -> Lwt.return (Error msg))
+  | Ok (No_match _) -> Lwt.return (Error "No matching rule")
+  | Error msg -> Lwt.return (Error msg)
 
 let handle_context_menu (state : state) (menu_id : string)
     (link_url : string) (page_url : string) (tab_id : int option) : state Lwt.t =
@@ -236,24 +247,11 @@ let handle_context_menu (state : state) (menu_id : string)
     (match String.is_empty url with
      | true -> Lwt.return state
      | false ->
-       let* result = call state Test { url } in
-       match result with
-       | Ok (Protocol.Match { rule_index; _ }) ->
-         let* rules_result = call state Get_rules () in
-         (match rules_result with
-          | Ok existing ->
-            let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
-            let* _set_result = call state Set_rules updated in
-            Lwt.return state
-          | Error msg ->
-            log (Printf.sprintf "Failed to fetch rules: %s" msg);
-            Lwt.return state)
-       | Ok (No_match _) ->
-         log (Printf.sprintf "No rule matches %s" url);
-         Lwt.return state
-       | Error msg ->
-         log (Printf.sprintf "Test error: %s" msg);
-         Lwt.return state)
+       let* result = delete_matching_rule state url in
+       (match result with
+        | Ok () -> ()
+        | Error msg -> log (Printf.sprintf "Delete rule: %s" msg));
+       Lwt.return state)
   | _ -> Lwt.return state
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
@@ -274,25 +272,11 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
        respond (`Assoc [ ("error", `String "url required") ]);
        Lwt.return state
      | false ->
-       let* result = call state Test { url } in
-       match result with
-       | Ok (Protocol.Match { rule_index; _ }) ->
-         let* rules_result = call state Get_rules () in
-         (match rules_result with
-          | Ok existing ->
-            let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
-            let* _set_result = call state Set_rules updated in
-            respond (`Assoc [ ("ok", `Bool true) ]);
-            Lwt.return state
-          | Error msg ->
-            respond (`Assoc [ ("error", `String msg) ]);
-            Lwt.return state)
-       | Ok (No_match _) ->
-         respond (`Assoc [ ("error", `String "No matching rule") ]);
-         Lwt.return state
-       | Error msg ->
-         respond (`Assoc [ ("error", `String msg) ]);
-         Lwt.return state)
+       let* result = delete_matching_rule state url in
+       (match result with
+        | Ok () -> respond (`Assoc [ ("ok", `Bool true) ])
+        | Error msg -> respond (`Assoc [ ("error", `String msg) ]));
+       Lwt.return state)
   | Ok other ->
     log (Printf.sprintf "Unknown popup action: %s" other);
     respond (`Assoc [ ("error", `String "unknown action") ]);
@@ -390,14 +374,14 @@ let register_chrome_listeners () : unit =
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       push (Context_menu { menu_id; link_url; page_url; tab_id }));
   Chrome_api.Runtime.on_message (fun msg_str respond ->
-     match Client.json_of_string msg_str with
+     match Protocol.parse_json_string msg_str with
      | Error _ ->
-       respond (Client.json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
+       respond (Protocol.json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
      | Ok json ->
        push
          (Popup_query
             { json;
-              respond = (fun resp -> respond (Client.json_to_string resp))
+              respond = (fun resp -> respond (Protocol.json_to_string resp))
             }));
   on_installed (fun () ->
     log "Extension installed";

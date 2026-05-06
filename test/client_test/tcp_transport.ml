@@ -5,8 +5,8 @@ let ( let* ) = Lwt.bind
 
 type t = {
   lwt_fd : Lwt_unix.file_descr;
-  incoming : string Lwt_stream.t;
-  send_raw : string -> unit;
+  read : string Lwt_stream.t;
+  write : string -> unit;
 }
 
 let connect ~host ~port =
@@ -15,7 +15,7 @@ let connect ~host ~port =
   let* () = Lwt_unix.connect lwt_fd addr in
   let ic = Lwt_io.of_fd ~mode:Lwt_io.Input lwt_fd in
   let oc = Lwt_io.of_fd ~mode:Lwt_io.Output lwt_fd in
-  let (incoming, push) = Lwt_stream.create () in
+  let (read, push) = Lwt_stream.create () in
   (* Background reader: read lines and push to stream *)
   Lwt.async (fun () ->
     Lwt.catch
@@ -29,13 +29,13 @@ let connect ~host ~port =
       (fun _exn ->
         push None;
         Lwt.return_unit));
-  (* send_raw writes via Lwt_io and flushes asynchronously *)
-  let send_raw msg =
+  (* write sends via Lwt_io and flushes asynchronously *)
+  let write msg =
     Lwt.async (fun () ->
       let* () = Lwt_io.write_line oc msg in
       Lwt_io.flush oc)
   in
-  Lwt.return { lwt_fd; incoming; send_raw }
+  Lwt.return { lwt_fd; read; write }
 
 let close t =
   Lwt_unix.close t.lwt_fd

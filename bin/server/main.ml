@@ -347,32 +347,27 @@ let handle_register params env ~respond:_ =
 
 let handle_open (request : Protocol.open_request) env ~respond =
   let url = request.url in
-  let target, _ =
-    Option.value ~default:(env.state.config.defaults.unmatched, 0)
-      (find_matching_rule env.state.compiled_rules url)
+  let matched_target =
+    find_matching_rule env.state.compiled_rules url
+    |> Option.value_map ~default:env.state.config.defaults.unmatched ~f:fst
   in
   let now = Unix.gettimeofday () in
   let (in_cooldown, pruned) = check_and_prune_cooldowns env.state.cooldowns ~now ~key:url in
   let state = { env.state with cooldowns = pruned } in
-  let target =
-    match in_cooldown || String.equal target env.tenant with
-    | true -> "local"
-    | false -> target
+  let is_local =
+    in_cooldown
+    || String.equal matched_target env.tenant
+    || String.equal matched_target "local"
   in
-  let cooldowns =
-    match String.equal target "local" with
-    | true -> state.cooldowns
-    | false ->
-      let cooldown = Float.of_int state.config.defaults.cooldown_seconds in
-      { key = url; expires = now +. cooldown } :: state.cooldowns
-  in
-  let state = { state with cooldowns } in
-  match String.equal target "local" with
+  match is_local with
   | true ->
     respond (Ok Protocol.Local);
     state
   | false ->
-    let (state, promise) = deliver_url state target url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+    let cooldown = Float.of_int state.config.defaults.cooldown_seconds in
+    let cooldowns = { key = url; expires = now +. cooldown } :: state.cooldowns in
+    let state = { state with cooldowns } in
+    let (state, promise) = deliver_url state matched_target url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
     Eio.Fiber.fork ~sw:env.sw (fun () ->
       let result = Eio.Promise.await promise in
       respond result);

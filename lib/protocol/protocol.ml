@@ -116,6 +116,9 @@ let parse_json_string (s : string) : (Yojson.Safe.t, string) Result.t =
   | json -> Result.return json
   | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
+let json_to_string (json : Yojson.Safe.t) : string =
+  Yojson.Safe.to_string json
+
 (* -- JSON identity for embedding raw JSON in wire envelopes *)
 
 type json = Yojson.Safe.t

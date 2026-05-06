@@ -93,8 +93,8 @@ let stop daemon =
 let connect daemon ?tenant ~name () =
   let* transport = Tcp_transport.connect ~host:"127.0.0.1" ~port:daemon.port in
   let* (conn, events) = Client.init
-    ~write:transport.send_raw
-    ~read:transport.incoming
+    ~write:transport.write
+    ~read:transport.read
     ?tenant
     ~name
     ()

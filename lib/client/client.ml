@@ -3,14 +3,6 @@ open! Stdio
 
 let ( let* ) = Lwt.bind
 
-(* -- JSON utilities *)
-
-let json_of_string (s : string) : (Yojson.Safe.t, string) Result.t =
-  Protocol.parse_json_string s
-
-let json_to_string (json : Yojson.Safe.t) : string =
-  Yojson.Safe.to_string json
-
 (* -- Events exposed to the caller *)
 
 type event =
@@ -55,7 +47,7 @@ type incoming_msg =
   | Parse_error of string
 
 let parse_message (raw : string) : incoming_msg =
-  match json_of_string raw with
+  match Protocol.parse_json_string raw with
   | Error msg -> Parse_error (Printf.sprintf "invalid JSON: %s" msg)
   | Ok json ->
     match Protocol.server_message_of_yojson json with
@@ -104,13 +96,13 @@ let handle_command (state : loop_state) (cmd : command)
       params = Protocol.request_serializer c request;
       tenant = None;
     } in
-    write (json_to_string (Protocol.request_envelope_to_yojson env));
+    write (Protocol.json_to_string (Protocol.request_envelope_to_yojson env));
     { next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver });
       raw_pending = state.raw_pending }
   | Raw { command; params; resolver } ->
     let env : Protocol.request_envelope = { id; command; params; tenant = None } in
-    write (json_to_string (Protocol.request_envelope_to_yojson env));
+    write (Protocol.json_to_string (Protocol.request_envelope_to_yojson env));
     { next_id = id + 1;
       pending = state.pending;
       raw_pending = Map.set state.raw_pending ~key:id ~data:resolver }
@@ -148,7 +140,7 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
   (* Send registration as id=0, fire-and-forget *)
   let register_req : Protocol.register_request = { brand; address = None; name } in
   let register_env = Protocol.make_request_envelope Register register_req 0 tenant in
-  write (json_to_string (Protocol.request_envelope_to_yojson register_env));
+  write (Protocol.json_to_string (Protocol.request_envelope_to_yojson register_env));
   (* Wait for Registered push to learn assigned tenant name *)
   let rec await_registered () =
     let* raw = Lwt_stream.next read in
