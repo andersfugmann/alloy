@@ -377,16 +377,11 @@ let handle_open (request : Protocol.open_request) env ~respond =
     state
 
 let handle_open_on (request : Protocol.open_on_request) env ~respond =
-  match String.equal request.target "local" with
-  | true ->
-    respond (Ok Protocol.Local);
-    env.state
-  | false ->
-    let (state, promise) = deliver_url env.state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
-    Eio.Fiber.fork ~sw:env.sw (fun () ->
-      let result = Eio.Promise.await promise in
-      respond result);
-    state
+  let (state, promise) = deliver_url env.state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+  Eio.Fiber.fork ~sw:env.sw (fun () ->
+    let result = Eio.Promise.await promise in
+    respond result);
+  state
 
 let handle_test (request : Protocol.open_request) env ~respond =
   let result =
