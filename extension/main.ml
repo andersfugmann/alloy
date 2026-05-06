@@ -26,7 +26,7 @@ type native_port = Chrome_api.port
 
 type event =
   | Navigation of { url : string; tab_id : int }
-  | Bridge_event of Bridge_protocol.event
+  | Bridge_event of Client.event
   | Port_disconnected
   | Connect_requested
   | Connect_with_settings of { port : native_port; tenant_name : string; daemon_host : string; daemon_port : string; debug_logging : bool }
@@ -36,7 +36,7 @@ type event =
   | Refresh_menus of { tenants : (string * string * bool) list }
 
 type state = {
-  connection : Bridge_protocol.connection option;
+  connection : Client.connection option;
   tenant_names : (string * string * bool) list;
   self_tenant_id : string option;
   debug_logging : bool;
@@ -81,7 +81,7 @@ let call : type req resp. state -> (req, resp) Protocol.command -> req ->
     | None -> Lwt.return (Error "not connected")
     | Some conn ->
       log (Printf.sprintf "-> %s" (Protocol.command_name cmd));
-      Bridge_protocol.call conn cmd request
+      Client.call conn cmd request
 
 (* -- Connection management *)
 
@@ -107,7 +107,7 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
   Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
   Chrome_api.Port.on_disconnect port (fun () -> push Port_disconnected);
   let register : Protocol.register_request = { brand; address; name } in
-  let (conn, bridge_events) = Bridge_protocol.init ~send_raw ~incoming:incoming_stream ~register in
+  let (conn, bridge_events) = Client.init ~send_raw ~incoming:incoming_stream ~register in
   (* Forward bridge events to coordinator *)
   Lwt.async (fun () ->
     let rec forward () =
@@ -247,14 +247,14 @@ let handle_context_menu (state : state) (menu_id : string)
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state Lwt.t =
-  match Bridge_protocol.string_field json "action" with
+  match Client.string_field json "action" with
   | Ok "reconnect" ->
     let state = connect state in
     respond (`Assoc [ ("connected", `Bool (is_connected state)) ]);
     Lwt.return state
   | Ok "delete_matching_rule" ->
     let url =
-      match Bridge_protocol.string_field json "url" with
+      match Client.string_field json "url" with
       | Ok s -> s
       | Error _ -> ""
     in
@@ -292,7 +292,7 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
 
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state Lwt.t =
-  match Bridge_protocol.string_field json "cmd" with
+  match Client.string_field json "cmd" with
   | Error _ -> handle_local_action state json respond
   | Ok cmd_name ->
     let params_json =
@@ -308,7 +308,7 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
       match state.connection with
       | None -> Lwt.return state
       | Some conn ->
-        let* resp_env = Bridge_protocol.send_raw_envelope conn ~command:cmd_name ~params:params_json in
+        let* resp_env = Client.send_raw_envelope conn ~command:cmd_name ~params:params_json in
         respond (Protocol.response_envelope_to_yojson resp_env);
         Lwt.return state
 
@@ -376,14 +376,14 @@ let register_chrome_listeners () : unit =
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       push (Context_menu { menu_id; link_url; page_url; tab_id }));
   Chrome_api.Runtime.on_message (fun msg_str respond ->
-     match Bridge_protocol.json_of_string msg_str with
+     match Client.json_of_string msg_str with
      | Error _ ->
-       respond (Bridge_protocol.json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
+       respond (Client.json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
      | Ok json ->
        push
          (Popup_query
             { json;
-              respond = (fun resp -> respond (Bridge_protocol.json_to_string resp))
+              respond = (fun resp -> respond (Client.json_to_string resp))
             }));
   on_installed (fun () ->
     log "Extension installed";
