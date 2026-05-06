@@ -26,8 +26,7 @@ type native_port = Chrome_api.port
 
 type event =
   | Navigation of { url : string; tab_id : int }
-  | Push_received of Protocol.push
-  | Registration_response of { success : bool; payload : Yojson.Safe.t; error : string option }
+  | Bridge_event of Bridge_protocol.event
   | Port_disconnected
   | Connect_requested
   | Connect_with_settings of { port : native_port; tenant_name : string; daemon_host : string; daemon_port : string; debug_logging : bool }
@@ -35,7 +34,6 @@ type event =
   | Popup_query of { json : Yojson.Safe.t; respond : Yojson.Safe.t -> unit }
   | Setup_menus
   | Refresh_menus of { tenants : (string * string * bool) list }
-  | Self_registered of { tenant_id : string }
 
 type state = {
   connection : Bridge_protocol.connection option;
@@ -82,7 +80,7 @@ let call : type req resp. state -> (req, resp) Protocol.command -> req ->
     match state.connection with
     | None -> Lwt.return (Error "not connected")
     | Some conn ->
-      log (Printf.sprintf "-> %s id=%d" (Protocol.command_name cmd) conn.next_id);
+      log (Printf.sprintf "-> %s" (Protocol.command_name cmd));
       Bridge_protocol.call conn cmd request
 
 (* -- Connection management *)
@@ -91,20 +89,6 @@ let non_empty (s : string) : string option =
   match String.is_empty s with
   | true -> None
   | false -> Some s
-
-let dispatch_port_message (conn : Bridge_protocol.connection) (raw : string) : unit =
-  match Bridge_protocol.parse_message raw with
-  | Parse_error msg ->
-    log (Printf.sprintf "Failed to parse bridge message: %s" msg)
-  | Push p -> push (Push_received p)
-  | Response { id = 0; envelope } ->
-    push (Registration_response { success = envelope.success; payload = envelope.payload; error = envelope.error })
-  | Response { id; envelope } ->
-    log (Printf.sprintf "← Response id=%d success=%b" id envelope.success);
-    let found = Bridge_protocol.dispatch_response conn id envelope in
-    match found with
-    | false -> log (Printf.sprintf "Orphan response for id=%d" id)
-    | true -> ()
 
 let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
@@ -119,15 +103,20 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     (Option.value name ~default:"(default)")
     (Option.value address ~default:"(default)"));
   let send_raw msg = Chrome_api.Port.post_message_json port msg in
-  let conn = Bridge_protocol.create ~send_raw in
-  Chrome_api.Port.on_message_json port (fun msg -> dispatch_port_message conn msg);
+  let (incoming_stream, push_incoming) = Lwt_stream.create () in
+  Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
   Chrome_api.Port.on_disconnect port (fun () -> push Port_disconnected);
-  let state = { connection = Some conn; tenant_names = []; self_tenant_id = None; debug_logging } in
-  let register_request : Protocol.register_request = { brand; address; name } in
-  let register_env = Protocol.make_request_envelope Register register_request 0 name in
-  log "→ Register id=0";
-  send_raw (Bridge_protocol.json_to_string (Protocol.request_envelope_to_yojson register_env));
-  state
+  let register : Protocol.register_request = { brand; address; name } in
+  let (conn, bridge_events) = Bridge_protocol.init ~send_raw ~incoming:incoming_stream ~register in
+  (* Forward bridge events to coordinator *)
+  Lwt.async (fun () ->
+    let rec forward () =
+      let* ev = Lwt_stream.next bridge_events in
+      push (Bridge_event ev);
+      forward ()
+    in
+    Lwt.catch forward (fun _exn -> Lwt.return_unit));
+  { connection = Some conn; tenant_names = []; self_tenant_id = None; debug_logging }
 
 let connect (_state : state) : state =
   match
@@ -167,8 +156,7 @@ let handle_push (state : state) (p : Protocol.push) : state =
     state
   | Registered { tenant_id } ->
     log (Printf.sprintf "Re-registered as tenant: %s" tenant_id);
-    push (Self_registered { tenant_id });
-    state
+    { state with self_tenant_id = Some tenant_id }
   | Config_updated { config = cfg; registered_tenants } ->
     log (Printf.sprintf "Config push: %d tenants, %d registered"
       (List.length cfg.tenants) (List.length registered_tenants));
@@ -276,24 +264,24 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
        Lwt.return state
      | false ->
        let* result = call state Test { url } in
-       (match result with
-        | Ok (Protocol.Match { rule_index; _ }) ->
-          let* rules_result = call state Get_rules () in
-          (match rules_result with
-           | Ok existing ->
-             let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
-             let* _set_result = call state Set_rules updated in
-             respond (`Assoc [ ("ok", `Bool true) ]);
-             Lwt.return state
-           | Error msg ->
-             respond (`Assoc [ ("error", `String msg) ]);
-             Lwt.return state)
-        | Ok (No_match _) ->
-          respond (`Assoc [ ("error", `String "No matching rule") ]);
-          Lwt.return state
-        | Error msg ->
-          respond (`Assoc [ ("error", `String msg) ]);
-          Lwt.return state))
+       match result with
+       | Ok (Protocol.Match { rule_index; _ }) ->
+         let* rules_result = call state Get_rules () in
+         (match rules_result with
+          | Ok existing ->
+            let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
+            let* _set_result = call state Set_rules updated in
+            respond (`Assoc [ ("ok", `Bool true) ]);
+            Lwt.return state
+          | Error msg ->
+            respond (`Assoc [ ("error", `String msg) ]);
+            Lwt.return state)
+       | Ok (No_match _) ->
+         respond (`Assoc [ ("error", `String "No matching rule") ]);
+         Lwt.return state
+       | Error msg ->
+         respond (`Assoc [ ("error", `String msg) ]);
+         Lwt.return state)
   | Ok other ->
     log (Printf.sprintf "Unknown popup action: %s" other);
     respond (`Assoc [ ("error", `String "unknown action") ]);
@@ -349,21 +337,10 @@ let setup_context_menus (tenants : (string * string * bool) list) (self_id : str
 let handle_event (state : state) (event : event) : state Lwt.t =
   match event with
   | Navigation { url; tab_id } -> handle_navigation state url tab_id
-  | Push_received p -> Lwt.return (handle_push state p)
-  | Registration_response { success; payload; error } ->
-    (match success with
-     | true ->
-       let tenant_id =
-         match payload with
-         | `String s -> s
-         | _ -> "unknown"
-       in
-       log (Printf.sprintf "← Registered id=0: %s" tenant_id);
-       Lwt.return { state with self_tenant_id = Some tenant_id }
-     | false ->
-       log (Printf.sprintf "← Registration error id=0: %s"
-         (Option.value error ~default:"unknown"));
-       Lwt.return { state with connection = None })
+  | Bridge_event (Push p) -> Lwt.return (handle_push state p)
+  | Bridge_event Disconnected ->
+    log "Bridge connection lost";
+    Lwt.return { state with connection = None }
   | Port_disconnected ->
     log "Native port disconnected, reconnecting in 2s…";
     Chrome_api.set_timeout (fun () -> push Connect_requested) Constants.reconnect_delay_ms;
@@ -380,9 +357,6 @@ let handle_event (state : state) (event : event) : state Lwt.t =
   | Refresh_menus { tenants } ->
     setup_context_menus tenants state.self_tenant_id;
     Lwt.return { state with tenant_names = tenants }
-  | Self_registered { tenant_id } ->
-    log (Printf.sprintf "Registered as tenant: %s" tenant_id);
-    Lwt.return { state with self_tenant_id = Some tenant_id }
 
 (* -- Coordinator loop *)
 
