@@ -11,58 +11,40 @@ let get_daemon () =
   | Some d -> d
   | None -> failwith "daemon not started"
 
-(* -- Helper: connect and wait for Registered push *)
-let connect_client ~name =
+(* -- Helper: connect with optional tenant *)
+let connect_client ?tenant ~name () =
   let d = get_daemon () in
-  let* (conn, events, transport) = Test_harness.connect d ~name in
-  (* Drain events until Registered *)
-  let rec wait_registered () =
-    let* ev = Lwt_stream.next events in
-    match ev with
-    | Client.Push (Protocol.Registered _) -> Lwt.return (conn, events, transport)
-    | _ -> wait_registered ()
-  in
-  wait_registered ()
+  Test_harness.connect d ?tenant ~name ()
 
-(* -- Helper: next push from event stream (skip Config_updated) *)
-let _next_push events =
-  let rec loop () =
-    let* ev = Lwt_stream.next events in
-    match ev with
-    | Client.Push (Protocol.Config_updated _) -> loop ()
-    | _ -> Lwt.return ev
-  in
-  loop ()
-
-(* -- Tests *)
+(* -- Tests: Registration *)
 
 let test_registration _switch () =
   let d = get_daemon () in
-  let* (_conn, events, transport) = Test_harness.connect d ~name:"reg-test" in
-  let* ev = Lwt_stream.next events in
-  (match ev with
-   | Client.Push (Protocol.Registered { tenant_id }) ->
-     Alcotest.(check string) "registered as anonymous" "anonymous" tenant_id
-   | _ -> Alcotest.fail "expected Registered push");
+  let* (conn, _events, transport) = Test_harness.connect d ~name:"reg-test" () in
+  Alcotest.(check string) "registered as anonymous" "anonymous" (Client.tenant_name conn);
   Tcp_transport.close transport
 
+let test_registration_with_tenant _switch () =
+  let* (conn, _events, transport) = connect_client ~tenant:"my-tenant" ~name:"named" () in
+  Alcotest.(check string) "registered as my-tenant" "my-tenant" (Client.tenant_name conn);
+  Tcp_transport.close transport
+
+(* -- Tests: Commands *)
+
 let test_status _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"status-test" in
+  let* (conn, _events, transport) = connect_client ~name:"status-test" () in
   let* result = Client.call conn Protocol.Status () in
   (match result with
    | Ok status ->
-     Alcotest.(check bool) "has tenants" true
-       (List.length status.Protocol.registered_tenants >= 0);
      Alcotest.(check bool) "uptime >= 0" true (status.uptime_seconds >= 0)
    | Error e -> Alcotest.fail (Printf.sprintf "status failed: %s" e));
   Tcp_transport.close transport
 
 let test_get_config _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"config-test" in
+  let* (conn, _events, transport) = connect_client ~name:"config-test" () in
   let* result = Client.call conn Protocol.Get_config () in
   (match result with
    | Ok config ->
-     (* Check the test-tenant exists *)
      let has_test_tenant =
        List.exists config.Protocol.tenants ~f:(fun (id, _) -> String.equal id "test-tenant")
      in
@@ -71,7 +53,7 @@ let test_get_config _switch () =
   Tcp_transport.close transport
 
 let test_get_rules _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"rules-test" in
+  let* (conn, _events, transport) = connect_client ~name:"rules-test" () in
   let* result = Client.call conn Protocol.Get_rules () in
   (match result with
    | Ok rules ->
@@ -80,7 +62,7 @@ let test_get_rules _switch () =
   Tcp_transport.close transport
 
 let test_set_rules _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"set-rules-test" in
+  let* (conn, _events, transport) = connect_client ~name:"set-rules-test" () in
   let new_rules : Protocol.rule list = [
     { pattern = "https://new[.]example[.]com/.*"; target = "test-tenant"; enabled = true };
   ] in
@@ -88,89 +70,103 @@ let test_set_rules _switch () =
   (match result with
    | Ok () -> ()
    | Error e -> Alcotest.fail (Printf.sprintf "set_rules failed: %s" e));
-  (* Verify by reading back *)
+  (* Verify round-trip *)
   let* result = Client.call conn Protocol.Get_rules () in
   (match result with
    | Ok rules ->
      Alcotest.(check int) "one rule" 1 (List.length rules);
-     Alcotest.(check string) "pattern matches" "https://new[.]example[.]com/.*"
+     Alcotest.(check string) "pattern" "https://new[.]example[.]com/.*"
        (List.hd_exn rules).pattern
-   | Error e -> Alcotest.fail (Printf.sprintf "get_rules verification failed: %s" e));
+   | Error e -> Alcotest.fail (Printf.sprintf "get_rules verify failed: %s" e));
   (* Restore original rules *)
   let original_rules : Protocol.rule list = [
-    { pattern = "https://routed[.]example[.]com/.*"; target = "test-tenant"; enabled = true };
-    { pattern = "https://disabled[.]example[.]com/.*"; target = "test-tenant"; enabled = false };
+    { pattern = "https?://www[.]example[.]com/.*"; target = "test-tenant"; enabled = true };
+    { pattern = "https?://disabled[.]example[.]com/.*"; target = "test-tenant"; enabled = false };
   ] in
   let* _result = Client.call conn Protocol.Set_rules original_rules in
   Tcp_transport.close transport
 
-let test_routing _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"routing-test" in
-  (* Test a URL that matches a rule *)
-  let* result = Client.call conn Protocol.Test { url = "https://routed.example.com/page" } in
-  (match result with
-   | Ok (Protocol.Match { tenant; rule_index = _ }) ->
-     Alcotest.(check string) "routed to test-tenant" "test-tenant" tenant
-   | Ok (Protocol.No_match _) -> Alcotest.fail "expected match, got no_match"
-   | Error e -> Alcotest.fail (Printf.sprintf "test routing failed: %s" e));
-  (* Test a URL that doesn't match any rule *)
-  let* result = Client.call conn Protocol.Test { url = "https://unmatched.example.com/page" } in
-  (match result with
-   | Ok (Protocol.No_match _) -> ()
-   | Ok (Protocol.Match _) -> Alcotest.fail "expected no_match, got match"
-   | Error e -> Alcotest.fail (Printf.sprintf "test no-match failed: %s" e));
-  Tcp_transport.close transport
+(* -- Tests: Routing *)
 
-let test_open_local _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"open-test" in
-  (* Open a URL that doesn't match any rule → should be Local *)
-  let* result = Client.call conn Protocol.Open { url = "https://local.example.com/page" } in
+let test_redirect _switch () =
+  (* Target client registers as "test-tenant" *)
+  let* (_target_conn, target_events, target_transport) =
+    connect_client ~tenant:"test-tenant" ~name:"target" () in
+  (* Source client registers as "alice" *)
+  let* (src_conn, _src_events, src_transport) =
+    connect_client ~tenant:"alice" ~name:"source" () in
+  (* Source opens a URL matching the rule → should route to test-tenant *)
+  let* result = Client.call src_conn Protocol.Open { url = "http://www.example.com/page" } in
+  (match result with
+   | Ok (Protocol.Remote tenant) ->
+     Alcotest.(check string) "routed to test-tenant" "test-tenant" tenant
+   | Ok Protocol.Local -> Alcotest.fail "expected Remote, got Local"
+   | Error e -> Alcotest.fail (Printf.sprintf "open failed: %s" e));
+  (* Target should receive Navigate push (skip Config_updated pushes) *)
+  let rec await_navigate () =
+    let* ev = Lwt_stream.next target_events in
+    match ev with
+    | Client.Push (Protocol.Navigate { url }) ->
+      Alcotest.(check string) "navigate url" "http://www.example.com/page" url;
+      Lwt.return_unit
+    | Client.Push (Protocol.Config_updated _) -> await_navigate ()
+    | _ -> Alcotest.fail "expected Navigate push on target"
+  in
+  let* () = await_navigate () in
+  let* () = Tcp_transport.close target_transport in
+  Tcp_transport.close src_transport
+
+let test_no_redirect _switch () =
+  let* (conn, _events, transport) = connect_client ~tenant:"alice" ~name:"no-redir" () in
+  (* URL doesn't match any rule → Local *)
+  let* result = Client.call conn Protocol.Open { url = "http://www.other.com/page" } in
   (match result with
    | Ok Protocol.Local -> ()
    | Ok (Protocol.Remote _) -> Alcotest.fail "expected Local, got Remote"
-   | Error e -> Alcotest.fail (Printf.sprintf "open local failed: %s" e));
+   | Error e -> Alcotest.fail (Printf.sprintf "open failed: %s" e));
   Tcp_transport.close transport
 
-let test_open_remote _switch () =
-  let* (conn, _events, transport) = connect_client ~name:"open-remote-test" in
-  (* Open a URL that matches a rule → remote tenant has no browser, expect error *)
-  let* result = Client.call conn Protocol.Open { url = "https://routed.example.com/page" } in
+let test_self_open _switch () =
+  (* Client registered as "test-tenant" opens URL targeting its own tenant → forced local *)
+  let* (conn, _events, transport) =
+    connect_client ~tenant:"test-tenant" ~name:"self" () in
+  let* result = Client.call conn Protocol.Open { url = "http://www.example.com/self" } in
   (match result with
-   | Error msg ->
-     (* Expected: no browser registered for test-tenant *)
-     Alcotest.(check bool) "error mentions tenant" true
-       (String.is_substring msg ~substring:"test-tenant")
-   | Ok (Protocol.Remote _) ->
-     (* Also acceptable if a browser was somehow registered *)
-     ()
-   | Ok Protocol.Local -> Alcotest.fail "expected Remote or error, got Local");
+   | Ok Protocol.Local -> ()
+   | Ok (Protocol.Remote _) -> Alcotest.fail "expected Local for self-open, got Remote"
+   | Error e -> Alcotest.fail (Printf.sprintf "self-open failed: %s" e));
   Tcp_transport.close transport
 
-let test_open_on _switch () =
-  (* Connect a target client *)
-  let d = get_daemon () in
-  let* (_target_conn, target_events, target_transport) =
-    Test_harness.connect d ~name:"target-client" in
-  (* Wait for target's registration *)
-  let rec wait_registered () =
-    let* ev = Lwt_stream.next target_events in
-    match ev with
-    | Client.Push (Protocol.Registered _) -> Lwt.return_unit
-    | _ -> wait_registered ()
-  in
-  let* () = wait_registered () in
-  (* Connect the sender *)
-  let* (sender_conn, _sender_events, sender_transport) = connect_client ~name:"sender" in
-  (* Send open_on targeting the other client — may error since target is "anonymous" *)
-  let* result = Client.call sender_conn Protocol.Open_on
-    { target = "target-client"; url = "https://navigate.example.com/page" } in
+let test_cooldown _switch () =
+  (* Target must be registered to receive redirects *)
+  let* (_target_conn, _target_events, target_transport) =
+    connect_client ~tenant:"test-tenant" ~name:"cooldown-target" () in
+  (* Source client *)
+  let* (src_conn, _src_events, src_transport) =
+    connect_client ~tenant:"alice" ~name:"cooldown-src" () in
+  let url = "http://www.example.com/cooldown-test" in
+  (* First open → Remote (starts cooldown) *)
+  let* result = Client.call src_conn Protocol.Open { url } in
   (match result with
-   | Ok _ -> ()
-   | Error msg ->
-     (* open_on targets by tenant name, not client name — may fail *)
-     Alcotest.(check bool) "got error" true (String.length msg > 0));
+   | Ok (Protocol.Remote _) -> ()
+   | Ok Protocol.Local -> Alcotest.fail "first open: expected Remote, got Local"
+   | Error e -> Alcotest.fail (Printf.sprintf "first open failed: %s" e));
+  (* Second open immediately → Local (cooldown active) *)
+  let* result = Client.call src_conn Protocol.Open { url } in
+  (match result with
+   | Ok Protocol.Local -> ()
+   | Ok (Protocol.Remote _) -> Alcotest.fail "second open: expected Local (cooldown), got Remote"
+   | Error e -> Alcotest.fail (Printf.sprintf "second open failed: %s" e));
+  (* Wait for cooldown to expire (1 second configured) *)
+  let* () = Lwt_unix.sleep 1.1 in
+  (* Third open → Remote again *)
+  let* result = Client.call src_conn Protocol.Open { url } in
+  (match result with
+   | Ok (Protocol.Remote _) -> ()
+   | Ok Protocol.Local -> Alcotest.fail "third open: expected Remote after cooldown, got Local"
+   | Error e -> Alcotest.fail (Printf.sprintf "third open failed: %s" e));
   let* () = Tcp_transport.close target_transport in
-  Tcp_transport.close sender_transport
+  Tcp_transport.close src_transport
 
 (* -- Test runner *)
 
@@ -180,7 +176,8 @@ let () =
   Lwt_main.run
     (Alcotest_lwt.run "client-integration" [
        ("registration", [
-          Alcotest_lwt.test_case "registers and receives push" `Quick test_registration;
+          Alcotest_lwt.test_case "anonymous" `Quick test_registration;
+          Alcotest_lwt.test_case "named tenant" `Quick test_registration_with_tenant;
         ]);
        ("commands", [
           Alcotest_lwt.test_case "status" `Quick test_status;
@@ -189,10 +186,10 @@ let () =
           Alcotest_lwt.test_case "set_rules" `Quick test_set_rules;
         ]);
        ("routing", [
-          Alcotest_lwt.test_case "test matched route" `Quick test_routing;
-          Alcotest_lwt.test_case "open local" `Quick test_open_local;
-          Alcotest_lwt.test_case "open remote" `Quick test_open_remote;
-          Alcotest_lwt.test_case "open_on with navigate push" `Quick test_open_on;
+          Alcotest_lwt.test_case "redirect" `Quick test_redirect;
+          Alcotest_lwt.test_case "no redirect" `Quick test_no_redirect;
+          Alcotest_lwt.test_case "self-open forced local" `Quick test_self_open;
+          Alcotest_lwt.test_case "cooldown" `Slow test_cooldown;
         ]);
      ]);
   Test_harness.stop d

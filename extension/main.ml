@@ -30,6 +30,7 @@ type event =
   | Port_disconnected
   | Connect_requested
   | Connect_with_settings of { port : native_port; tenant_name : string; daemon_host : string; daemon_port : string; debug_logging : bool }
+  | Connection_ready of Client.connection
   | Context_menu of { menu_id : string; link_url : string; page_url : string; tab_id : int option }
   | Popup_query of { json : Yojson.Safe.t; respond : Yojson.Safe.t -> unit }
   | Setup_menus
@@ -83,6 +84,17 @@ let call : type req resp. state -> (req, resp) Protocol.command -> req ->
       log (Printf.sprintf "-> %s" (Protocol.command_name cmd));
       Client.call conn cmd request
 
+(* -- JSON helpers *)
+
+let string_field (json : Yojson.Safe.t) (key : string) : (string, string) Result.t =
+  match json with
+  | `Assoc pairs ->
+    (match List.Assoc.find pairs ~equal:String.equal key with
+     | Some (`String s) -> Ok s
+     | Some _ -> Error (Printf.sprintf "field %s: expected string" key)
+     | None -> Error (Printf.sprintf "missing field: %s" key))
+  | _ -> Error "expected JSON object"
+
 (* -- Connection management *)
 
 let non_empty (s : string) : string option =
@@ -93,30 +105,29 @@ let non_empty (s : string) : string option =
 let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
   let name = non_empty tenant_name in
-  let address =
+  let _address =
     let h = Option.value (non_empty daemon_host) ~default:"127.0.0.1" in
     let p = Option.value (non_empty daemon_port) ~default:(Int.to_string Constants.default_port) in
     Some (Printf.sprintf "%s:%s" h p)
   in
-  log (Printf.sprintf "Browser brand: %s, tenant: %s, address: %s"
+  log (Printf.sprintf "Browser brand: %s, tenant: %s"
     (Option.value brand ~default:"(none)")
-    (Option.value name ~default:"(default)")
-    (Option.value address ~default:"(default)"));
-  let send_raw msg = Chrome_api.Port.post_message_json port msg in
-  let (incoming_stream, push_incoming) = Lwt_stream.create () in
+    (Option.value name ~default:"(default)"));
+  let write msg = Chrome_api.Port.post_message_json port msg in
+  let (read, push_incoming) = Lwt_stream.create () in
   Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
   Chrome_api.Port.on_disconnect port (fun () -> push Port_disconnected);
-  let register : Protocol.register_request = { brand; address; name } in
-  let (conn, bridge_events) = Client.init ~send_raw ~incoming:incoming_stream ~register in
-  (* Forward bridge events to coordinator *)
+  (* Client.init is async — sends register and waits for Registered push *)
   Lwt.async (fun () ->
+    let* (conn, bridge_events) = Client.init ~write ~read ?tenant:name ?name ?brand () in
+    push (Connection_ready conn);
     let rec forward () =
       let* ev = Lwt_stream.next bridge_events in
       push (Bridge_event ev);
       forward ()
     in
     Lwt.catch forward (fun _exn -> Lwt.return_unit));
-  { connection = Some conn; tenant_names = []; self_tenant_id = None; debug_logging }
+  { connection = None; tenant_names = []; self_tenant_id = None; debug_logging }
 
 let connect (_state : state) : state =
   match
@@ -247,14 +258,14 @@ let handle_context_menu (state : state) (menu_id : string)
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state Lwt.t =
-  match Client.string_field json "action" with
+  match string_field json "action" with
   | Ok "reconnect" ->
     let state = connect state in
     respond (`Assoc [ ("connected", `Bool (is_connected state)) ]);
     Lwt.return state
   | Ok "delete_matching_rule" ->
     let url =
-      match Client.string_field json "url" with
+      match string_field json "url" with
       | Ok s -> s
       | Error _ -> ""
     in
@@ -292,7 +303,7 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
 
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state Lwt.t =
-  match Client.string_field json "cmd" with
+  match string_field json "cmd" with
   | Error _ -> handle_local_action state json respond
   | Ok cmd_name ->
     let params_json =
@@ -308,7 +319,7 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
       match state.connection with
       | None -> Lwt.return state
       | Some conn ->
-        let* resp_env = Client.send_raw_envelope conn ~command:cmd_name ~params:params_json in
+        let* resp_env = Client.send_raw_command conn ~command:cmd_name ~params:params_json in
         respond (Protocol.response_envelope_to_yojson resp_env);
         Lwt.return state
 
@@ -348,6 +359,9 @@ let handle_event (state : state) (event : event) : state Lwt.t =
   | Connect_requested -> Lwt.return (connect state)
   | Connect_with_settings { port; tenant_name; daemon_host; daemon_port; debug_logging } ->
     Lwt.return (connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging)
+  | Connection_ready conn ->
+    log (Printf.sprintf "Registered as tenant: %s" (Client.tenant_name conn));
+    Lwt.return { state with connection = Some conn; self_tenant_id = Some (Client.tenant_name conn) }
   | Context_menu { menu_id; link_url; page_url; tab_id } ->
     handle_context_menu state menu_id link_url page_url tab_id
   | Popup_query { json; respond } -> handle_popup_query state json respond

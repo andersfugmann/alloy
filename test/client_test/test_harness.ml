@@ -28,8 +28,8 @@ let test_config ~port =
 
 let test_rules =
   {|[
-  {"pattern": "https://routed[.]example[.]com/.*", "target": "test-tenant", "enabled": true},
-  {"pattern": "https://disabled[.]example[.]com/.*", "target": "test-tenant", "enabled": false}
+  {"pattern": "https?://www[.]example[.]com/.*", "target": "test-tenant", "enabled": true},
+  {"pattern": "https?://disabled[.]example[.]com/.*", "target": "test-tenant", "enabled": false}
 ]|}
 
 let find_free_port () =
@@ -90,12 +90,13 @@ let stop daemon =
     Stdlib.Sys.remove (daemon.config_dir ^ "/" ^ name));
   Stdlib.Sys.rmdir daemon.config_dir
 
-let connect daemon ~name =
+let connect daemon ?tenant ~name () =
   let* transport = Tcp_transport.connect ~host:"127.0.0.1" ~port:daemon.port in
-  let register : Protocol.register_request = { brand = None; address = None; name = Some name } in
-  let (conn, events) = Client.init
-    ~send_raw:transport.send_raw
-    ~incoming:transport.incoming
-    ~register
+  let* (conn, events) = Client.init
+    ~write:transport.send_raw
+    ~read:transport.incoming
+    ?tenant
+    ~name
+    ()
   in
   Lwt.return (conn, events, transport)
