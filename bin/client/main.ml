@@ -203,19 +203,18 @@ let run_register ~net ~host ~port ~tenant =
   let flow =
     connect_to_daemon ~sw net ~host ~port
   in
-  let env = Protocol.make_request_envelope Register { brand = None; address = None; name = None } 1 (Some tenant) in
+  let env = Protocol.make_request_envelope Register { brand = None; address = None; name = None } 0 (Some tenant) in
   Eio.Flow.copy_string (Protocol.serialize_request_envelope env ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let first_line = Eio.Buf_read.line reader in
   (match Protocol.deserialize_server_message first_line with
-   | Ok (Response resp_env) ->
-     (match resp_env.success with
-      | true -> printf "Registered as %s\n%!" tenant
-      | false ->
-        eprintf "Registration failed: %s\n%!" (Option.value resp_env.error ~default:"unknown");
-        Stdlib.exit 1)
-   | _ ->
-     eprintf "Unexpected registration response\n%!";
+   | Ok (Push { id = _; push = Registered { tenant_id } }) ->
+     printf "Registered as %s\n%!" tenant_id
+   | Ok _ ->
+     eprintf "Unexpected message during registration\n%!";
+     Stdlib.exit 1
+   | Error msg ->
+     eprintf "Registration parse error: %s\n%!" msg;
      Stdlib.exit 1);
   let rec read_loop () =
     match Eio.Buf_read.line reader with
@@ -337,18 +336,9 @@ let run_bridge env =
       let flow = connect_to_daemon ~sw net ~host ~port in
       Eio.Flow.copy_string (register_line ^ "\n") flow;
       let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
-      (* Read registration response and forward to extension *)
+      (* Forward first message (Registered push) to extension *)
       let first_line = Eio.Buf_read.line reader in
-      (match Protocol.deserialize_server_message first_line with
-       | Ok (Response resp_env) ->
-         (match resp_env.success with
-          | true -> Eio.Stream.add stdout_stream first_line
-          | false ->
-            eprintf "Registration failed: %s\n%!" (Option.value resp_env.error ~default:"unknown");
-            failwith (Option.value resp_env.error ~default:"registration failed"))
-       | _ ->
-         eprintf "Unexpected registration response\n%!";
-         failwith "unexpected registration response");
+      Eio.Stream.add stdout_stream first_line;
       (* Transparent relay: no parsing, no ID management *)
       Eio.Fiber.both
         (fun () ->

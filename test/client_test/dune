@@ -1,0 +1,14 @@
+(executable
+ (name client_test)
+ (libraries client protocol constants alcotest-lwt lwt lwt.unix base stdio yojson unix)
+ (preprocess
+  (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (deps
+  (:test client_test.exe)
+  (:server %{workspace_root}/bin/server/main.exe))
+ (action
+  (setenv ALLOYD_BIN %{server}
+   (run %{test}))))
