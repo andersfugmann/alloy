@@ -194,6 +194,28 @@ let response_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t
   | Set_rules -> (fun _ -> Ok ())
   | Status -> status_info_of_yojson
 
+let request_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (req, string) Result.t) = function
+  | Register -> register_request_of_yojson
+  | Open -> open_request_of_yojson
+  | Open_on -> open_on_request_of_yojson
+  | Test -> open_request_of_yojson
+  | Get_config -> (fun _ -> Ok ())
+  | Set_config -> config_of_yojson
+  | Get_rules -> (fun _ -> Ok ())
+  | Set_rules -> rules_of_yojson
+  | Status -> (fun _ -> Ok ())
+
+let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
+  | Register -> (fun s -> `String s)
+  | Open -> route_result_to_yojson
+  | Open_on -> route_result_to_yojson
+  | Test -> test_result_to_yojson
+  | Get_config -> config_to_yojson
+  | Set_config -> (fun () -> `Null)
+  | Get_rules -> rules_to_yojson
+  | Set_rules -> (fun () -> `Null)
+  | Status -> status_info_to_yojson
+
 (* -- High-level serialization *)
 
 let make_request_envelope : type req resp. (req, resp) command -> req -> int -> string option -> request_envelope =
@@ -251,18 +273,6 @@ let%expect_test "request envelope round-trip" =
     set_rules: ok
     status: ok
     |}]
-
-(* Test helper: serialize a response for a command *)
-let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
-  | Register -> (fun s -> `String s)
-  | Open -> route_result_to_yojson
-  | Open_on -> route_result_to_yojson
-  | Test -> test_result_to_yojson
-  | Get_config -> config_to_yojson
-  | Set_config -> (fun () -> `Null)
-  | Get_rules -> rules_to_yojson
-  | Set_rules -> (fun () -> `Null)
-  | Status -> status_info_to_yojson
 
 let%expect_test "response round-trip" =
   let test : type req resp. (req, resp) command -> resp -> string -> unit =

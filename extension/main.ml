@@ -207,6 +207,11 @@ let delete_matching_rule (state : state) (url : string)
 
 let handle_context_menu (state : state) (menu_id : string)
     (link_url : string) (page_url : string) (tab_id : int option) : state Lwt.t =
+  let effective_url =
+    match String.is_empty link_url with
+    | true -> page_url
+    | false -> link_url
+  in
   match String.lsplit2 menu_id ~on:':' with
   | Some ("open_in", target) ->
     (match String.is_empty link_url with
@@ -223,31 +228,22 @@ let handle_context_menu (state : state) (menu_id : string)
         | Ok _ -> Option.iter tab_id ~f:Chrome_api.Tabs.remove
         | Error _ -> ());
        Lwt.return state)
-  | _ ->
-  let url =
-    match String.is_empty link_url with
-    | true -> page_url
-    | false -> link_url
-  in
-  match menu_id with
-  | "add_rule" ->
-    (match String.is_empty url with
+  | _ when String.equal menu_id "add_rule" ->
+    (match String.is_empty effective_url with
      | true -> Lwt.return state
      | false ->
        let encoded_url =
-         url |> Js.string |> Js.encodeURIComponent |> Js.to_string
+         effective_url |> Js.string |> Js.encodeURIComponent |> Js.to_string
        in
-       let dialog_url =
-         Printf.sprintf "add_rule.html?url=%s" encoded_url
-       in
+       let dialog_url = Printf.sprintf "add_rule.html?url=%s" encoded_url in
        Chrome_api.Windows.create_popup ~url:dialog_url
          ~width:Constants.popup_width ~height:Constants.popup_height;
        Lwt.return state)
-  | "delete_rule" ->
-    (match String.is_empty url with
+  | _ when String.equal menu_id "delete_rule" ->
+    (match String.is_empty effective_url with
      | true -> Lwt.return state
      | false ->
-       let* result = delete_matching_rule state url in
+       let* result = delete_matching_rule state effective_url in
        (match result with
         | Ok () -> ()
         | Error msg -> log (Printf.sprintf "Delete rule: %s" msg));
@@ -295,17 +291,14 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
       | `Null -> `Assoc []
       | p -> p
     in
-    match is_connected state with
-    | false ->
+    match state.connection with
+    | None ->
       respond (`Assoc [ ("success", `Bool false); ("error", `String "Not connected") ]);
       Lwt.return state
-    | true ->
-      match state.connection with
-      | None -> Lwt.return state
-      | Some conn ->
-        let* resp_env = Client.send_raw_command conn ~command:cmd_name ~params:params_json in
-        respond (Protocol.response_envelope_to_yojson resp_env);
-        Lwt.return state
+    | Some conn ->
+      let* resp_env = Client.send_raw_command conn ~command:cmd_name ~params:params_json in
+      respond (Protocol.response_envelope_to_yojson resp_env);
+      Lwt.return state
 
 let setup_context_menus (tenants : (string * string * bool) list) (self_id : string option) : unit =
   remove_all_context_menus (fun () ->
