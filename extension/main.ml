@@ -4,24 +4,6 @@ open Js_of_ocaml
 
 let log = Chrome_api.log
 
-(* -- JSON conversion *)
-
-let json_of_string (s : string) : (Yojson.Safe.t, string) Result.t =
-  Protocol.parse_json_string s
-
-let json_to_string (json : Yojson.Safe.t) : string =
-  Yojson.Safe.to_string json
-
-let string_field (json : Yojson.Safe.t) (key : string) :
-    (string, string) Result.t =
-  match json with
-  | `Assoc pairs ->
-    (match List.Assoc.find pairs ~equal:String.equal key with
-     | Some (`String s) -> Ok s
-     | Some _ -> Error (Printf.sprintf "field %s: expected string" key)
-     | None -> Error (Printf.sprintf "missing field: %s" key))
-  | _ -> Error "expected JSON object"
-
 (* -- Typed wrappers around Chrome APIs *)
 
 let create_tab = Chrome_api.Tabs.create_url
@@ -56,9 +38,7 @@ type event =
   | Apply_set_rules of { rules : Protocol.rule list }
 
 type state = {
-  native_port : native_port option;
-  next_id : int;
-  pending : (Protocol.response_envelope -> unit) Map.M(Int).t;
+  connection : Bridge_protocol.connection option;
   tenant_names : (string * string * bool) list;
   self_tenant_id : string option;
   debug_logging : bool;
@@ -73,7 +53,7 @@ let push ev = push_event (Some ev)
 
 (* -- State operations (pure) *)
 
-let initial_state = { native_port = None; next_id = 1; pending = Map.empty (module Int); tenant_names = []; self_tenant_id = None; debug_logging = false }
+let initial_state = { connection = None; tenant_names = []; self_tenant_id = None; debug_logging = false }
 
 let debug (state : state) (msg : string) : unit =
   match state.debug_logging with
@@ -81,7 +61,7 @@ let debug (state : state) (msg : string) : unit =
   | false -> ()
 
 let is_connected (state : state) : bool =
-  Option.is_some state.native_port
+  Option.is_some state.connection
 
 let update_badge (connected : bool) : unit =
   match connected with
@@ -98,29 +78,28 @@ let update_badge (connected : bool) : unit =
 
 let send_envelope (state : state) (command : string) (params : Yojson.Safe.t)
     (on_response : Protocol.response_envelope -> unit) : state =
-  match state.native_port with
+  match state.connection with
   | None ->
     log "No native port connected";
     on_response { id = 0; success = false; payload = `Null; error = Some "not connected" };
     state
-  | Some p ->
-    let id = state.next_id in
-    let env : Protocol.request_envelope = { id; command; params; tenant = None } in
-    log (Printf.sprintf "-> %s id=%d" command id);
-    Chrome_api.Port.post_message_json p (json_to_string (Protocol.request_envelope_to_yojson env));
-    { state with
-      next_id = id + 1;
-      pending = Map.set state.pending ~key:id ~data:on_response }
+  | Some conn ->
+    log (Printf.sprintf "-> %s id=%d" command conn.next_id);
+    let conn = Bridge_protocol.send_envelope conn ~command ~params ~on_response in
+    { state with connection = Some conn }
 
 let send_command : type req resp. state -> (req, resp) Protocol.command -> req ->
     ((resp, string) Result.t -> unit) -> state =
   fun state cmd request on_result ->
-    let command = Protocol.command_name cmd in
-    let request_json = Protocol.request_serializer cmd request in
-    send_envelope state command request_json (fun resp_env ->
-      match resp_env.success with
-      | true -> on_result (Protocol.response_deserializer cmd resp_env.payload)
-      | false -> on_result (Error (Option.value resp_env.error ~default:"unknown error")))
+    match state.connection with
+    | None ->
+      log "No native port connected";
+      on_result (Error "not connected");
+      state
+    | Some conn ->
+      log (Printf.sprintf "-> %s id=%d" (Protocol.command_name cmd) conn.next_id);
+      let conn = Bridge_protocol.send_command conn cmd request on_result in
+      { state with connection = Some conn }
 
 (* -- Connection management *)
 
@@ -141,12 +120,14 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     (Option.value brand ~default:"(none)")
     (Option.value name ~default:"(default)")
     (Option.value address ~default:"(default)"));
-  let state = { native_port = Some port; next_id = 1; pending = Map.empty (module Int); tenant_names = []; self_tenant_id = None; debug_logging } in
+  let send_raw msg = Chrome_api.Port.post_message_json port msg in
+  let conn = Bridge_protocol.empty_connection ~send_raw in
+  let state = { connection = Some conn; tenant_names = []; self_tenant_id = None; debug_logging } in
   (* Register uses id=0: response handled by id=0 handler, not pending map *)
   let register_request : Protocol.register_request = { brand; address; name } in
   let register_env = Protocol.make_request_envelope Register register_request 0 name in
   log "→ Register id=0";
-  Chrome_api.Port.post_message_json port (json_to_string (Protocol.request_envelope_to_yojson register_env));
+  send_raw (Bridge_protocol.json_to_string (Protocol.request_envelope_to_yojson register_env));
   state
 
 let connect (_state : state) : state =
@@ -174,7 +155,7 @@ let connect (_state : state) : state =
                daemon_port = find "daemon_port";
                debug_logging = String.equal (find "debug_logging") "true";
              }));
-    (* native_port stays None until connect_with_settings — prevents race *)
+    (* connection stays None until connect_with_settings — prevents race *)
     initial_state
   | exception exn ->
     log (Printf.sprintf "Failed to connect: %s" (Exn.to_string exn));
@@ -202,46 +183,38 @@ let handle_push (state : state) (p : Protocol.push) : state =
     state
 
 let handle_bridge_message (state : state) (raw : string) : state =
-  match json_of_string raw with
-  | Error msg ->
-    log (Printf.sprintf "Failed to parse bridge JSON: %s" msg);
+  match Bridge_protocol.parse_message raw with
+  | Parse_error msg ->
+    log (Printf.sprintf "Failed to parse bridge message: %s" msg);
     state
-  | Ok json ->
-    (match Protocol.server_message_of_yojson json with
-     | Ok (Push { id = _; push = p }) ->
-       handle_push state p
-     | Ok (Response resp_env) ->
-       (match resp_env.id with
-        | 0 ->
-          (* id=0: registration response *)
-          (match resp_env.success with
-           | true ->
-             let tenant_id =
-               match resp_env.payload with
-               | `String s -> s
-               | _ -> "unknown"
-             in
-             log (Printf.sprintf "← Registered id=0: %s" tenant_id);
-             push (Self_registered { tenant_id });
-             state
-           | false ->
-             log (Printf.sprintf "← Registration error id=0: %s"
-               (Option.value resp_env.error ~default:"unknown"));
-             push Port_disconnected;
-             { state with native_port = None; pending = Map.empty (module Int) })
-        | id ->
-          log (Printf.sprintf "← Response id=%d success=%b (pending: %d)"
-            id resp_env.success (Map.length state.pending));
-          (match Map.find state.pending id with
-           | None ->
-             log (Printf.sprintf "Orphan response for id=%d" id);
-             state
-           | Some cb ->
-             cb resp_env;
-             { state with pending = Map.remove state.pending id }))
-     | Error msg ->
-       log (Printf.sprintf "Failed to parse bridge message: %s" msg);
-       state)
+  | Push p -> handle_push state p
+  | Response { id = 0; envelope } ->
+    (* id=0: registration response *)
+    (match envelope.success with
+     | true ->
+       let tenant_id =
+         match envelope.payload with
+         | `String s -> s
+         | _ -> "unknown"
+       in
+       log (Printf.sprintf "← Registered id=0: %s" tenant_id);
+       push (Self_registered { tenant_id });
+       state
+     | false ->
+       log (Printf.sprintf "← Registration error id=0: %s"
+         (Option.value envelope.error ~default:"unknown"));
+       push Port_disconnected;
+       { state with connection = None })
+  | Response { id; envelope } ->
+    log (Printf.sprintf "← Response id=%d success=%b" id envelope.success);
+    match state.connection with
+    | None -> state
+    | Some conn ->
+      let (conn, found) = Bridge_protocol.dispatch_response conn id envelope in
+      (match found with
+       | false -> log (Printf.sprintf "Orphan response for id=%d" id)
+       | true -> ());
+      { state with connection = Some conn }
 
 let handle_navigation (state : state) (url : string) (tab_id : int) : state =
   match is_connected state with
@@ -313,14 +286,14 @@ let handle_context_menu (state : state) (menu_id : string)
 
 let handle_local_action (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state =
-  match string_field json "action" with
+  match Bridge_protocol.string_field json "action" with
   | Ok "reconnect" ->
     let state = connect state in
     respond (`Assoc [ ("connected", `Bool (is_connected state)) ]);
     state
   | Ok "delete_matching_rule" ->
     let url =
-      match string_field json "url" with
+      match Bridge_protocol.string_field json "url" with
       | Ok s -> s
       | Error _ -> ""
     in
@@ -349,7 +322,7 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
 let handle_popup_query (state : state) (json : Yojson.Safe.t)
     (respond : Yojson.Safe.t -> unit) : state =
   (* Protocol command passthrough: {"cmd": "<command>", "params": <json>} *)
-  match string_field json "cmd" with
+  match Bridge_protocol.string_field json "cmd" with
   | Error _ -> handle_local_action state json respond
   | Ok cmd_name ->
     let params_json =
@@ -445,14 +418,14 @@ let register_chrome_listeners () : unit =
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       push (Context_menu { menu_id; link_url; page_url; tab_id }));
   Chrome_api.Runtime.on_message (fun msg_str respond ->
-     match json_of_string msg_str with
+     match Bridge_protocol.json_of_string msg_str with
      | Error _ ->
-       respond (json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
+       respond (Bridge_protocol.json_to_string (`Assoc [ ("error", `String "invalid JSON") ]))
      | Ok json ->
        push
          (Popup_query
             { json;
-              respond = (fun resp -> respond (json_to_string resp))
+              respond = (fun resp -> respond (Bridge_protocol.json_to_string resp))
             }));
   on_installed (fun () ->
     log "Extension installed";

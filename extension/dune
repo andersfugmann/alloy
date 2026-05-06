@@ -6,6 +6,11 @@
   (pps js_of_ocaml-ppx)))
 
 (library
+ (name bridge_protocol)
+ (modules bridge_protocol)
+ (libraries protocol base stdio yojson))
+
+(library
  (name page_util)
  (modules page_util)
  (libraries chrome_api protocol constants js_of_ocaml base stdio)
@@ -16,7 +21,7 @@
  (name main)
  (modules main)
  (modes js)
- (libraries chrome_api page_util protocol constants js_of_ocaml js_of_ocaml-lwt lwt base stdio yojson)
+ (libraries chrome_api bridge_protocol page_util protocol constants js_of_ocaml js_of_ocaml-lwt lwt base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))
