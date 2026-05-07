@@ -47,6 +47,7 @@ type state = {
   subclient_ports : Chrome_api.port list;
   subclient_pending : (int * Chrome_api.port) Map.M(Int).t;
   subclient_next_id : int;
+  subclient_queue : (int * string) list;
 }
 
 (* -- Event stream *)
@@ -66,6 +67,7 @@ let initial_state = {
   subclient_ports = [];
   subclient_pending = Map.empty (module Int);
   subclient_next_id = 1;
+  subclient_queue = [];
 }
 
 let debug state msg =
@@ -168,7 +170,8 @@ let connect_with_settings port tenant_name daemon_host daemon_port ~debug_loggin
     in
     Lwt.catch forward (fun _exn -> Lwt.return_unit));
   { connection = None; tenant_names = []; self_tenant_id = None; debug_logging;
-    subclient_ports = []; subclient_pending = Map.empty (module Int); subclient_next_id = 1 }
+    subclient_ports = []; subclient_pending = Map.empty (module Int); subclient_next_id = 1;
+    subclient_queue = [] }
 
 let connect _state =
   match
@@ -378,6 +381,9 @@ let handle_event state event =
     Lwt.return (connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging)
   | Connection_ready conn ->
     log (Printf.sprintf "Registered as tenant: %s" (Client.tenant_name conn));
+    (* Flush any queued subclient requests *)
+    List.iter (List.rev state.subclient_queue) ~f:(fun (_coord_id, serialized) ->
+      Client.subclient_write conn serialized);
     Lwt.async (fun () ->
       let stream = Client.subclient_read conn in
       let rec forward () =
@@ -386,7 +392,9 @@ let handle_event state event =
         forward ()
       in
       Lwt.catch forward (fun _exn -> Lwt.return_unit));
-    Lwt.return { state with connection = Some conn; self_tenant_id = Some (Client.tenant_name conn) }
+    Lwt.return { state with connection = Some conn;
+      self_tenant_id = Some (Client.tenant_name conn);
+      subclient_queue = [] }
   | Context_menu { menu_id; link_url; page_url; tab_id } ->
     handle_context_menu state menu_id link_url page_url tab_id
   | Popup_query { json; respond } -> handle_popup_query state json respond
@@ -415,17 +423,22 @@ let handle_event state event =
       Lwt.return { state with
         subclient_ports = port :: state.subclient_ports }
     | false ->
-      (* Request: assign coordinator ID, store mapping, forward *)
+      (* Request: assign coordinator ID, store mapping, forward or queue *)
       let coord_id = state.subclient_next_id in
-      log (Printf.sprintf "Port request: orig_id=%d coord_id=%d connected=%b"
-        frame.id coord_id (Option.is_some state.connection));
       let wire_frame = { Protocol.id = coord_id; payload = frame.payload } in
-      Option.iter state.connection ~f:(fun conn ->
-        Client.subclient_write conn (Protocol.serialize_frame wire_frame));
-      Lwt.return { state with
+      let serialized = Protocol.serialize_frame wire_frame in
+      let state = { state with
         subclient_next_id = coord_id + 1;
         subclient_pending = Map.set state.subclient_pending ~key:coord_id
-          ~data:(frame.id, port) }
+          ~data:(frame.id, port) } in
+      match state.connection with
+      | Some conn ->
+        log (Printf.sprintf "Port request: orig_id=%d coord_id=%d" frame.id coord_id);
+        Client.subclient_write conn serialized;
+        Lwt.return state
+      | None ->
+        log (Printf.sprintf "Port request queued: orig_id=%d coord_id=%d" frame.id coord_id);
+        Lwt.return { state with subclient_queue = (coord_id, serialized) :: state.subclient_queue }
     end
   | Page_port_disconnected { port } ->
     log "Port disconnected";
