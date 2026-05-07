@@ -140,6 +140,15 @@ module Runtime = struct
               in
               f msg_str respond;
               Js._true)))
+
+  let connect () : port =
+    let p : _ Js.t = call rt "connect" [||] in
+    Js.Unsafe.coerce p
+
+  let on_connect (f : port -> unit) : unit =
+    add_listener rt "onConnect"
+      (inject (Js.wrap_callback (fun (p : _ Js.t) ->
+        f (Js.Unsafe.coerce p : port))))
 end
 
 (* ── Tabs ────────────────────────────────────────────────────────── *)

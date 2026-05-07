@@ -20,6 +20,8 @@ module Runtime : sig
   val on_installed : (unit -> unit) -> unit
   val on_startup : (unit -> unit) -> unit
   val on_message : (string -> (string -> unit) -> unit) -> unit
+  val connect : unit -> port
+  val on_connect : (port -> unit) -> unit
 end
 
 module Tabs : sig
