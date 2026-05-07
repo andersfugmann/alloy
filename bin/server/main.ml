@@ -432,6 +432,10 @@ let handle_status _request env ~respond =
   respond (Ok { Protocol.registered_tenants = tenants; uptime_seconds = uptime });
   env.state
 
+let handle_connection_info _request env ~respond =
+  respond (Ok { Protocol.tenant_id = env.tenant });
+  env.state
+
 (* -- Command lookup: single match on string → handler bundle *)
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
@@ -444,6 +448,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "get_rules" -> Ok (Handler { cmd = Get_rules; handle = handle_get_rules })
   | "set_rules" -> Ok (Handler { cmd = Set_rules; handle = handle_set_rules })
   | "status" -> Ok (Handler { cmd = Status; handle = handle_status })
+  | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = handle_connection_info })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)

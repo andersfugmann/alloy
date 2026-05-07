@@ -132,7 +132,12 @@ let load_tenants (conn : Client.connection) : unit =
     Lwt.async (fun () ->
       let* status_result = Client.call conn Status () in
       let* config_result = Client.call conn Get_config () in
-      let self_id = Client.tenant_name conn in
+      let* info_result = Client.call conn Connection_info () in
+      let self_id =
+        match info_result with
+        | Ok info -> info.Protocol.tenant_id
+        | Error _ -> Client.tenant_name conn
+      in
       begin match (status_result, config_result) with
       | (Ok status, Ok cfg) ->
         set_status (not (List.is_empty status.Protocol.registered_tenants))
