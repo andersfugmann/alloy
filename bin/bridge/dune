@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (public_name alloy_bridge)
+ (package alloy)
+ (libraries protocol constants eio eio_main yojson base stdio unix))
