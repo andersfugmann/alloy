@@ -154,12 +154,13 @@ let run_loop ~(command_stream : command Lwt_stream.t)
     raw_pending = Map.empty (module Int);
     subclient_pending = Map.empty (module Int);
   } in
+  let merged = Lwt_stream.choose [
+    Lwt_stream.map (fun c -> `Command c) command_stream;
+    Lwt_stream.map (fun r -> `Incoming r) read;
+    Lwt_stream.map (fun s -> `Subclient s) subclient_write_stream;
+  ] in
   let rec loop state =
-    let* msg = Lwt.pick [
-      (let* c = Lwt_stream.next command_stream in Lwt.return (`Command c));
-      (let* raw = Lwt_stream.next read in Lwt.return (`Incoming raw));
-      (let* raw = Lwt_stream.next subclient_write_stream in Lwt.return (`Subclient raw));
-    ] in
+    let* msg = Lwt_stream.next merged in
     match msg with
     | `Command cmd ->
       loop (handle_command state cmd ~write)

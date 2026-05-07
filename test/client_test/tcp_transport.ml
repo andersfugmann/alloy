@@ -29,15 +29,16 @@ let connect ~host ~port =
       (fun _exn ->
         push None;
         Lwt.return_unit));
-  (* write sends via Lwt_io and flushes asynchronously *)
-  let write msg =
-    Lwt.async (fun () ->
-      Lwt.catch
-        (fun () ->
+  let (write_stream, push_write) = Lwt_stream.create () in
+  (* Writer fiber — processes messages sequentially, guaranteeing order *)
+  Lwt.async (fun () ->
+    Lwt.catch
+      (fun () ->
+        Lwt_stream.iter_s (fun msg ->
           let* () = Lwt_io.write_line oc msg in
-          Lwt_io.flush oc)
-        (fun _exn -> Lwt.return_unit))
-  in
+          Lwt_io.flush oc) write_stream)
+      (fun _exn -> Lwt.return_unit));
+  let write msg = push_write (Some msg) in
   Lwt.return { lwt_fd; read; write }
 
 let close t =
