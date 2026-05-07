@@ -112,17 +112,17 @@ let handle_incoming (state : loop_state) (raw : string)
     dispatch_pending state id result ~push_subclient
 
 let handle_command (state : loop_state) (cmd : command)
-    ~(write : string -> unit) : loop_state =
+    ~(tenant : string) ~(write : string -> unit) : loop_state =
   let id = state.next_id in
   match cmd with
   | Typed (Outgoing { cmd = c; request; resolver }) ->
-    let frame = Protocol.make_request_frame c request id "" in
+    let frame = Protocol.make_request_frame c request id tenant in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver }) }
   | Raw { command; params; resolver } ->
-    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant:"" in
+    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
@@ -142,7 +142,7 @@ let handle_subclient_request (state : loop_state) (raw : string)
       subclient_pending = Map.set state.subclient_pending ~key:id
         ~data:{ original_id = frame.id; sub_tenant } }
 
-let run_loop ~(command_stream : command Lwt_stream.t)
+let run_loop ~(tenant : string) ~(command_stream : command Lwt_stream.t)
     ~(read : string Lwt_stream.t)
     ~(subclient_write_stream : string Lwt_stream.t)
     ~(push_event : event option -> unit)
@@ -163,7 +163,7 @@ let run_loop ~(command_stream : command Lwt_stream.t)
     let* msg = Lwt_stream.next merged in
     match msg with
     | `Command cmd ->
-      loop (handle_command state cmd ~write)
+      loop (handle_command state cmd ~tenant ~write)
     | `Incoming raw ->
       loop (handle_incoming state raw ~push_event ~push_subclient)
     | `Subclient raw ->
@@ -204,7 +204,8 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
   (* Start connection thread *)
   Lwt.async (fun () ->
     Lwt.catch
-      (fun () -> run_loop ~command_stream ~read ~subclient_write_stream
+      (fun () -> run_loop ~tenant:assigned_tenant ~command_stream ~read
+                   ~subclient_write_stream
                    ~push_event ~push_subclient ~write)
       (fun _exn ->
         push_event (Some Disconnected);

@@ -190,17 +190,32 @@ let create_option (doc : Dom_html.document Js.t) ~(value : string)
 let connect_port ~(tenant : string)
     ~(on_ready : Client.connection -> unit)
     ~(on_event : Client.event -> unit) : unit =
+  Chrome_api.log "connect_port: calling chrome.runtime.connect()";
   let port = Chrome_api.Runtime.connect () in
+  Chrome_api.log "connect_port: port created, setting up listeners";
   let write msg = Chrome_api.Port.post_message_json port msg in
   let (read, push_incoming) = Lwt_stream.create () in
-  Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
-  Chrome_api.Port.on_disconnect port (fun () -> push_incoming None);
+  Chrome_api.Port.on_message_json port (fun msg ->
+    Chrome_api.log (Printf.sprintf "connect_port: incoming message: %s"
+      (String.prefix msg 200));
+    push_incoming (Some msg));
+  Chrome_api.Port.on_disconnect port (fun () ->
+    Chrome_api.log "connect_port: port disconnected";
+    push_incoming None);
   Lwt.async (fun () ->
-    let* (conn, events) = Client.init ~write ~read ~tenant () in
-    on_ready conn;
-    let rec forward () =
-      let* ev = Lwt_stream.next events in
-      on_event ev;
-      forward ()
-    in
-    Lwt.catch forward (fun _exn -> Lwt.return_unit))
+    Chrome_api.log "connect_port: starting Client.init";
+    Lwt.catch
+      (fun () ->
+        let* (conn, events) = Client.init ~write ~read ~tenant () in
+        Chrome_api.log "connect_port: Client.init complete, connected";
+        on_ready conn;
+        let rec forward () =
+          let* ev = Lwt_stream.next events in
+          on_event ev;
+          forward ()
+        in
+        Lwt.catch forward (fun _exn -> Lwt.return_unit))
+      (fun exn ->
+        Chrome_api.log (Printf.sprintf "connect_port: error: %s"
+          (Base.Exn.to_string exn));
+        Lwt.return_unit))

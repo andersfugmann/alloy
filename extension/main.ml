@@ -398,7 +398,7 @@ let handle_event (state : state) (event : event) : state Lwt.t =
   | Refresh_menus { tenants } ->
     setup_context_menus tenants state.self_tenant_id;
     Lwt.return { state with tenant_names = tenants }
-  | Page_port_message { port; raw; frame } ->
+  | Page_port_message { port; raw = _; frame } ->
     begin match Multiplexer.is_register_frame frame with
     | true ->
       let desired =
@@ -417,7 +417,7 @@ let handle_event (state : state) (event : event) : state Lwt.t =
       log (Printf.sprintf "Port message: id=%d tenant=%s connected=%b"
         frame.id frame.tenant (Option.is_some state.connection));
       Option.iter state.connection ~f:(fun conn ->
-        Client.subclient_write conn raw);
+        Client.subclient_write conn (Protocol.serialize_frame frame));
       Lwt.return state
     end
   | Page_port_disconnected { port } ->
