@@ -407,12 +407,15 @@ let handle_event (state : state) (event : event) : state Lwt.t =
         | false -> frame.tenant
       in
       let tenant_id = Multiplexer.assign_tenant_id state.ports desired state.port_counter in
+      log (Printf.sprintf "Port registered: %s" tenant_id);
       let registered_frame = Protocol.make_push_frame (Registered { tenant_id }) in
       Chrome_api.Port.post_message_json port (Protocol.serialize_frame registered_frame);
       Lwt.return { state with
         ports = Map.set state.ports ~key:tenant_id ~data:port;
         port_counter = state.port_counter + 1 }
     | false ->
+      log (Printf.sprintf "Port message: id=%d tenant=%s connected=%b"
+        frame.id frame.tenant (Option.is_some state.connection));
       Option.iter state.connection ~f:(fun conn ->
         Client.subclient_write conn raw);
       Lwt.return state
@@ -427,21 +430,28 @@ let handle_event (state : state) (event : event) : state Lwt.t =
           | true -> Some key
           | false -> acc)
     in
+    log (Printf.sprintf "Port disconnected: %s"
+      (Option.value tenant_id ~default:"(unknown)"));
     begin match tenant_id with
     | Some tid -> Lwt.return { state with ports = Map.remove state.ports tid }
     | None -> Lwt.return state
     end
   | Subclient_response raw ->
     begin match Protocol.deserialize_frame raw with
-    | Error _msg -> ()
+    | Error msg ->
+      log (Printf.sprintf "Subclient response parse error: %s" msg)
     | Ok frame ->
+      log (Printf.sprintf "Subclient response: id=%d tenant=%s ports=[%s]"
+        frame.id frame.tenant
+        (Map.keys state.ports |> String.concat ~sep:", "));
       begin match frame.id with
       | 0 ->
         Map.iter state.ports ~f:(fun port ->
           Chrome_api.Port.post_message_json port raw)
       | _ ->
         begin match String.is_empty frame.tenant with
-        | true -> ()
+        | true ->
+          log "Subclient response: empty tenant, dropped"
         | false ->
           Option.iter (Map.find state.ports frame.tenant) ~f:(fun port ->
             Chrome_api.Port.post_message_json port raw)
