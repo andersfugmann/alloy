@@ -28,7 +28,6 @@ type command =
 
 type subclient_entry = {
   original_id : int;
-  sub_tenant : string;
 }
 
 type loop_state = {
@@ -89,12 +88,12 @@ let dispatch_pending (state : loop_state) (id : int)
   | None ->
     match Map.find state.raw_pending id with
     | Some resolver ->
-      Lwt.wakeup_later resolver (Protocol.make_response_frame id ~tenant:"" result);
+      Lwt.wakeup_later resolver (Protocol.make_response_frame id result);
       { state with raw_pending = Map.remove state.raw_pending id }
     | None ->
       match Map.find state.subclient_pending id with
-      | Some { original_id; sub_tenant } ->
-        let frame = Protocol.make_response_frame original_id ~tenant:sub_tenant result in
+      | Some { original_id } ->
+        let frame = Protocol.make_response_frame original_id result in
         push_subclient (Some (Protocol.serialize_frame frame));
         { state with subclient_pending = Map.remove state.subclient_pending id }
       | None -> state
@@ -112,17 +111,17 @@ let handle_incoming (state : loop_state) (raw : string)
     dispatch_pending state id result ~push_subclient
 
 let handle_command (state : loop_state) (cmd : command)
-    ~(tenant : string) ~(write : string -> unit) : loop_state =
+    ~(write : string -> unit) : loop_state =
   let id = state.next_id in
   match cmd with
   | Typed (Outgoing { cmd = c; request; resolver }) ->
-    let frame = Protocol.make_request_frame c request id tenant in
+    let frame = Protocol.make_request_frame c request id in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver }) }
   | Raw { command; params; resolver } ->
-    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant in
+    let frame = Protocol.make_request_frame_raw ~command ~params ~id in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
@@ -134,15 +133,14 @@ let handle_subclient_request (state : loop_state) (raw : string)
   | Error _msg -> state
   | Ok frame ->
     let id = state.next_id in
-    let sub_tenant = frame.tenant in
-    let wire_frame = { Protocol.id; tenant = ""; payload = frame.payload } in
+    let wire_frame = { Protocol.id; payload = frame.payload } in
     write (Protocol.serialize_frame wire_frame);
     { state with
       next_id = id + 1;
       subclient_pending = Map.set state.subclient_pending ~key:id
-        ~data:{ original_id = frame.id; sub_tenant } }
+        ~data:{ original_id = frame.id } }
 
-let run_loop ~(tenant : string) ~(command_stream : command Lwt_stream.t)
+let run_loop ~(command_stream : command Lwt_stream.t)
     ~(read : string Lwt_stream.t)
     ~(subclient_write_stream : string Lwt_stream.t)
     ~(push_event : event option -> unit)
@@ -163,7 +161,7 @@ let run_loop ~(tenant : string) ~(command_stream : command Lwt_stream.t)
     let* msg = Lwt_stream.next merged in
     match msg with
     | `Command cmd ->
-      loop (handle_command state cmd ~tenant ~write)
+      loop (handle_command state cmd ~write)
     | `Incoming raw ->
       loop (handle_incoming state raw ~push_event ~push_subclient)
     | `Subclient raw ->
@@ -176,7 +174,7 @@ let run_loop ~(tenant : string) ~(command_stream : command Lwt_stream.t)
 let tenant_name (conn : connection) : string = conn.tenant_name
 
 let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
-    ?(tenant="") ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
+    ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
   let (command_stream, push_command) = Lwt_stream.create () in
   let (event_stream, push_event) = Lwt_stream.create () in
   let (subclient_write_stream, push_subclient_write) = Lwt_stream.create () in
@@ -184,7 +182,7 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
   let subclient_write raw = push_subclient_write (Some raw) in
   (* Send registration as id=0, fire-and-forget *)
   let register_req : Protocol.register_request = { brand; address = None; name } in
-  let frame = Protocol.make_request_frame Register register_req 0 tenant in
+  let frame = Protocol.make_request_frame Register register_req 0 in
   write (Protocol.serialize_frame frame);
   (* Wait for Registered push to learn assigned tenant name *)
   let rec await_registered () =
@@ -204,7 +202,7 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
   (* Start connection thread *)
   Lwt.async (fun () ->
     Lwt.catch
-      (fun () -> run_loop ~tenant:assigned_tenant ~command_stream ~read
+      (fun () -> run_loop ~command_stream ~read
                    ~subclient_write_stream
                    ~push_event ~push_subclient ~write)
       (fun _exn ->

@@ -90,12 +90,11 @@ let stop daemon =
     Stdlib.Sys.remove (daemon.config_dir ^ "/" ^ name));
   Stdlib.Sys.rmdir daemon.config_dir
 
-let connect daemon ?tenant ~name () =
+let connect daemon ~name () =
   let* transport = Tcp_transport.connect ~host:"127.0.0.1" ~port:daemon.port in
   let* (conn, events) = Client.init
     ~write:transport.write
     ~read:transport.read
-    ?tenant
     ~name
     ()
   in

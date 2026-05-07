@@ -159,7 +159,7 @@ let load_tenants (conn : Client.connection) : unit =
 
 let () =
   Chrome_api.log "Popup script starting";
-  Page_util.connect_port ~tenant:"popup"
+  Page_util.connect_port ~name:"popup"
     ~on_ready:(fun conn ->
       load_tenants conn;
 

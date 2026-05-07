@@ -245,7 +245,6 @@ async function testBridge() {
   writeNativeMessage(proc.stdin, {
     id: 0,
     command: ["Register", { brand: "Integration Test", address: TEST_ADDR, name: "test-node" }],
-    tenant: "test-node",
   });
 
   const regResp = await reader.read();
@@ -381,7 +380,6 @@ async function testTcp() {
   client.send({
     id: 1,
     command: ["Register", { brand: "TCP Test" }],
-    tenant: "test-tcp",
   });
 
   const regResp = await client.read();
@@ -412,7 +410,6 @@ async function testTcp() {
   oneshot.send({
     id: 10,
     command: ["Get_config"],
-    tenant: "oneshot-test",
   });
 
   const oneshotResp = await oneshot.read();

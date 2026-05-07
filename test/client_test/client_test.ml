@@ -12,9 +12,9 @@ let get_daemon () =
   | None -> failwith "daemon not started"
 
 (* -- Helper: connect, run test, then close *)
-let with_client ?tenant ~name f _switch () =
+let with_client ~name f _switch () =
   let d = get_daemon () in
-  let* (conn, events, transport) = Test_harness.connect d ?tenant ~name () in
+  let* (conn, events, transport) = Test_harness.connect d ~name () in
   Lwt.finalize
     (fun () -> f conn events)
     (fun () -> Tcp_transport.close transport)
@@ -22,10 +22,10 @@ let with_client ?tenant ~name f _switch () =
 (* -- Tests: Registration *)
 
 let test_registration = with_client ~name:"reg-test" (fun conn _events ->
-  Alcotest.(check string) "registered as anonymous" "anonymous" (Client.tenant_name conn);
+  Alcotest.(check string) "registered as reg-test" "reg-test" (Client.tenant_name conn);
   Lwt.return_unit)
 
-let test_registration_with_tenant = with_client ~tenant:"my-tenant" ~name:"named" (fun conn _events ->
+let test_registration_with_tenant = with_client ~name:"my-tenant" (fun conn _events ->
   Alcotest.(check string) "registered as my-tenant" "my-tenant" (Client.tenant_name conn);
   Lwt.return_unit)
 
@@ -88,10 +88,10 @@ let test_redirect _switch () =
   let d = get_daemon () in
   (* Target client registers as "test-tenant" *)
   let* (_target_conn, target_events, target_transport) =
-    Test_harness.connect d ~tenant:"test-tenant" ~name:"target" () in
-  (* Source client registers as "alice" *)
+    Test_harness.connect d ~name:"test-tenant" () in
+  (* Source client registers as "source" *)
   let* (src_conn, _src_events, src_transport) =
-    Test_harness.connect d ~tenant:"alice" ~name:"source" () in
+    Test_harness.connect d ~name:"source" () in
   Lwt.finalize (fun () ->
     (* Source opens a URL matching the rule → should route to test-tenant *)
     let* result = Client.call src_conn Protocol.Open { url = "http://www.example.com/page" } in
@@ -115,7 +115,7 @@ let test_redirect _switch () =
     let* () = Tcp_transport.close target_transport in
     Tcp_transport.close src_transport)
 
-let test_no_redirect = with_client ~tenant:"alice" ~name:"no-redir" (fun conn _events ->
+let test_no_redirect = with_client ~name:"no-redir" (fun conn _events ->
   (* URL doesn't match any rule → Local *)
   let* result = Client.call conn Protocol.Open { url = "http://www.other.com/page" } in
   (match result with
@@ -124,7 +124,7 @@ let test_no_redirect = with_client ~tenant:"alice" ~name:"no-redir" (fun conn _e
    | Error e -> Alcotest.fail (Printf.sprintf "open failed: %s" e));
   Lwt.return_unit)
 
-let test_self_open = with_client ~tenant:"test-tenant" ~name:"self" (fun conn _events ->
+let test_self_open = with_client ~name:"test-tenant" (fun conn _events ->
   (* Client registered as "test-tenant" opens URL targeting its own tenant → forced local *)
   let* result = Client.call conn Protocol.Open { url = "http://www.example.com/self" } in
   (match result with
@@ -137,10 +137,10 @@ let test_cooldown _switch () =
   let d = get_daemon () in
   (* Target must be registered to receive redirects *)
   let* (_target_conn, _target_events, target_transport) =
-    Test_harness.connect d ~tenant:"test-tenant" ~name:"cooldown-target" () in
+    Test_harness.connect d ~name:"test-tenant" () in
   (* Source client *)
   let* (src_conn, _src_events, src_transport) =
-    Test_harness.connect d ~tenant:"alice" ~name:"cooldown-src" () in
+    Test_harness.connect d ~name:"cooldown-src" () in
   Lwt.finalize (fun () ->
     let url = "http://www.example.com/cooldown-test" in
     (* First open → Remote (starts cooldown) *)
@@ -190,14 +190,13 @@ let test_subclient_status _switch () =
     let conn = _conn in
     (* Verify the connection works with a normal call first *)
     let* _result = Client.call conn Protocol.Status () in
-    (* Build a subclient frame: Status command with id=99, tenant="popup_001" *)
-    let frame = Protocol.make_request_frame Protocol.Status () 99 "popup_001" in
+    (* Build a subclient frame: Status command with id=99 *)
+    let frame = Protocol.make_request_frame Protocol.Status () 99 in
     let raw = Protocol.serialize_frame frame in
     Client.subclient_write conn raw;
-    (* Read subclient_read — response should have original id and tenant restored *)
+    (* Read subclient_read — response should have original id restored *)
     let* (_resp_raw, resp) = await_subclient_response (Client.subclient_read conn) in
     Alcotest.(check int) "id restored" 99 resp.id;
-    Alcotest.(check string) "tenant restored" "popup_001" resp.tenant;
     (* Verify payload is a success response with status info *)
     (match Protocol.parse_response_payload resp with
      | Ok (Protocol.Success _) -> ()
@@ -213,19 +212,17 @@ let test_subclient_id_rewriting _switch () =
     let conn = _conn in
     (* Verify connection works *)
     let* _result = Client.call conn Protocol.Status () in
-    (* Send two subclient requests with the same id=1 but different tenants *)
-    let frame1 = Protocol.make_request_frame Protocol.Status () 1 "popup_a" in
-    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 "popup_b" in
+    (* Send two subclient requests with the same id=1 *)
+    let frame1 = Protocol.make_request_frame Protocol.Status () 1 in
+    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 in
     Client.subclient_write conn (Protocol.serialize_frame frame1);
     Client.subclient_write conn (Protocol.serialize_frame frame2);
-    (* Both should get responses with their original id=1 and correct tenant *)
+    (* Both should get responses with their original id=1 *)
     let stream = Client.subclient_read conn in
     let* (_raw1, resp1) = await_subclient_response stream in
     let* (_raw2, resp2) = await_subclient_response stream in
     Alcotest.(check int) "first: id" 1 resp1.id;
-    Alcotest.(check string) "first: tenant" "popup_a" resp1.tenant;
     Alcotest.(check int) "second: id" 1 resp2.id;
-    Alcotest.(check string) "second: tenant" "popup_b" resp2.tenant;
     Lwt.return_unit)
   (fun () -> Tcp_transport.close transport)
 
@@ -233,10 +230,10 @@ let test_subclient_push_broadcast _switch () =
   let d = get_daemon () in
   (* Parent client with subclient channel *)
   let* (parent_conn, _parent_events, parent_transport) =
-    Test_harness.connect d ~tenant:"proxy-bcast" ~name:"proxy-bcast" () in
+    Test_harness.connect d ~name:"proxy-bcast" () in
   (* Another client that will trigger a push *)
   let* (trigger_conn, _trigger_events, trigger_transport) =
-    Test_harness.connect d ~tenant:"test-tenant" ~name:"trigger" () in
+    Test_harness.connect d ~name:"trigger" () in
   Lwt.finalize (fun () ->
     (* Source opens a URL matching a rule → target (test-tenant) gets Navigate push.
        The parent_conn also receives the push on its subclient_read (it receives ALL pushes). *)
@@ -251,7 +248,7 @@ let test_subclient_push_broadcast _switch () =
     (* Now trigger an action that sends a push to our parent client:
        Register a third client that will cause Config_updated push to parent *)
     let* (_extra_conn, _extra_events, extra_transport) =
-      Test_harness.connect d ~tenant:"extra" ~name:"extra" () in
+      Test_harness.connect d ~name:"extra" () in
     (* Wait briefly for the push to propagate *)
     let* () = Lwt_unix.sleep 0.1 in
     (* subclient_read should have the raw Config_updated push *)

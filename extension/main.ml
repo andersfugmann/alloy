@@ -44,8 +44,9 @@ type state = {
   tenant_names : (string * string * bool) list;
   self_tenant_id : string option;
   debug_logging : bool;
-  ports : Chrome_api.port Map.M(String).t;
-  port_counter : int;
+  subclient_ports : Chrome_api.port list;
+  subclient_pending : (int * Chrome_api.port) Map.M(Int).t;
+  subclient_next_id : int;
 }
 
 (* -- Event stream *)
@@ -62,8 +63,9 @@ let initial_state = {
   tenant_names = [];
   self_tenant_id = None;
   debug_logging = false;
-  ports = Map.empty (module String);
-  port_counter = 0;
+  subclient_ports = [];
+  subclient_pending = Map.empty (module Int);
+  subclient_next_id = 1;
 }
 
 let debug (state : state) (msg : string) : unit =
@@ -157,7 +159,7 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     in
     log (Printf.sprintf "Bridge connected: hostname=%s, tenant=%s"
       hostname (Option.value name ~default:"(default)"));
-    let* (conn, bridge_events) = Client.init ~write ~read ?tenant:name ?name ?brand () in
+    let* (conn, bridge_events) = Client.init ~write ~read ?name ?brand () in
     push (Connection_ready conn);
     let rec forward () =
       let* ev = Lwt_stream.next bridge_events in
@@ -166,7 +168,7 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
     in
     Lwt.catch forward (fun _exn -> Lwt.return_unit));
   { connection = None; tenant_names = []; self_tenant_id = None; debug_logging;
-    ports = Map.empty (module String); port_counter = 0 }
+    subclient_ports = []; subclient_pending = Map.empty (module Int); subclient_next_id = 1 }
 
 let connect (_state : state) : state =
   match
@@ -335,7 +337,7 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
   | Ok rp ->
     match state.connection with
     | None ->
-      respond (Protocol.frame_to_yojson (Protocol.make_response_frame 0 ~tenant:"" (Error "Not connected")));
+      respond (Protocol.frame_to_yojson (Protocol.make_response_frame 0 (Error "Not connected")));
       Lwt.return state
     | Some conn ->
       let* resp_frame = Client.send_raw_command conn ~command:rp.Protocol.command ~params:rp.params in
@@ -401,64 +403,64 @@ let handle_event (state : state) (event : event) : state Lwt.t =
   | Page_port_message { port; raw = _; frame } ->
     begin match Multiplexer.is_register_frame frame with
     | true ->
+      (* Registration handled locally — add port to broadcast list, send Registered back *)
       let desired =
-        match String.is_empty frame.tenant with
-        | true -> "anonymous"
-        | false -> frame.tenant
+        match Protocol.parse_request_payload frame with
+        | Ok rp ->
+          begin match Protocol.request_deserializer Protocol.Register rp.params with
+          | Ok req -> Option.value req.name ~default:"anonymous"
+          | Error _ -> "anonymous"
+          end
+        | Error _ -> "anonymous"
       in
-      let tenant_id = Multiplexer.assign_tenant_id state.ports desired state.port_counter in
-      log (Printf.sprintf "Port registered: %s" tenant_id);
-      let registered_frame = Protocol.make_push_frame (Registered { tenant_id }) in
+      log (Printf.sprintf "Port registered: %s" desired);
+      let registered_frame = Protocol.make_push_frame (Registered { tenant_id = desired }) in
       Chrome_api.Port.post_message_json port (Protocol.serialize_frame registered_frame);
       Lwt.return { state with
-        ports = Map.set state.ports ~key:tenant_id ~data:port;
-        port_counter = state.port_counter + 1 }
+        subclient_ports = port :: state.subclient_ports }
     | false ->
-      log (Printf.sprintf "Port message: id=%d tenant=%s connected=%b"
-        frame.id frame.tenant (Option.is_some state.connection));
+      (* Request: assign coordinator ID, store mapping, forward *)
+      let coord_id = state.subclient_next_id in
+      log (Printf.sprintf "Port request: orig_id=%d coord_id=%d connected=%b"
+        frame.id coord_id (Option.is_some state.connection));
+      let wire_frame = { Protocol.id = coord_id; payload = frame.payload } in
       Option.iter state.connection ~f:(fun conn ->
-        Client.subclient_write conn (Protocol.serialize_frame frame));
-      Lwt.return state
+        Client.subclient_write conn (Protocol.serialize_frame wire_frame));
+      Lwt.return { state with
+        subclient_next_id = coord_id + 1;
+        subclient_pending = Map.set state.subclient_pending ~key:coord_id
+          ~data:(frame.id, port) }
     end
   | Page_port_disconnected { port } ->
-    let tenant_id =
-      Map.fold state.ports ~init:None ~f:(fun ~key ~data acc ->
-        match acc with
-        | Some _ -> acc
-        | None ->
-          match phys_equal data port with
-          | true -> Some key
-          | false -> acc)
-    in
-    log (Printf.sprintf "Port disconnected: %s"
-      (Option.value tenant_id ~default:"(unknown)"));
-    begin match tenant_id with
-    | Some tid -> Lwt.return { state with ports = Map.remove state.ports tid }
-    | None -> Lwt.return state
-    end
+    log "Port disconnected";
+    Lwt.return { state with
+      subclient_ports = List.filter state.subclient_ports ~f:(fun p ->
+        not (phys_equal p port));
+      subclient_pending = Map.filter state.subclient_pending ~f:(fun (_orig_id, p) ->
+        not (phys_equal p port)) }
   | Subclient_response raw ->
     begin match Protocol.deserialize_frame raw with
     | Error msg ->
-      log (Printf.sprintf "Subclient response parse error: %s" msg)
+      log (Printf.sprintf "Subclient response parse error: %s" msg);
+      Lwt.return state
     | Ok frame ->
-      log (Printf.sprintf "Subclient response: id=%d tenant=%s ports=[%s]"
-        frame.id frame.tenant
-        (Map.keys state.ports |> String.concat ~sep:", "));
-      begin match frame.id with
+      match frame.id with
       | 0 ->
-        Map.iter state.ports ~f:(fun port ->
-          Chrome_api.Port.post_message_json port raw)
-      | _ ->
-        begin match String.is_empty frame.tenant with
-        | true ->
-          log "Subclient response: empty tenant, dropped"
-        | false ->
-          Option.iter (Map.find state.ports frame.tenant) ~f:(fun port ->
-            Chrome_api.Port.post_message_json port raw)
-        end
-      end
-    end;
-    Lwt.return state
+        (* Broadcast push to all subclient ports *)
+        List.iter state.subclient_ports ~f:(fun port ->
+          Chrome_api.Port.post_message_json port raw);
+        Lwt.return state
+      | coord_id ->
+        match Map.find state.subclient_pending coord_id with
+        | Some (orig_id, port) ->
+          let restored_frame = { Protocol.id = orig_id; payload = frame.payload } in
+          Chrome_api.Port.post_message_json port (Protocol.serialize_frame restored_frame);
+          Lwt.return { state with
+            subclient_pending = Map.remove state.subclient_pending coord_id }
+        | None ->
+          log (Printf.sprintf "Subclient response: unknown coord_id=%d, dropped" coord_id);
+          Lwt.return state
+    end
 
 (* -- Coordinator loop *)
 

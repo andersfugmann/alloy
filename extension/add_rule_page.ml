@@ -30,7 +30,7 @@ let () =
 (* -- Entry point -- *)
 
 let () =
-  Page_util.connect_port ~tenant:"add_rule"
+  Page_util.connect_port ~name:"add_rule"
     ~on_ready:(fun conn ->
       (* Fetch tenants from config *)
       Lwt.async (fun () ->

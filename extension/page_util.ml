@@ -21,7 +21,7 @@ let send_message (msg : Yojson.Safe.t)
 let send_protocol_command : type req resp. (req, resp) Protocol.command -> req ->
     on_response:((resp, string) Result.t -> unit) -> unit =
   fun cmd params ~on_response ->
-    let frame = Protocol.make_request_frame cmd params 0 "" in
+    let frame = Protocol.make_request_frame cmd params 0 in
     let msg = Protocol.frame_to_yojson frame in
     send_message msg ~on_response:(fun result ->
       match result with
@@ -187,7 +187,7 @@ let create_option (doc : Dom_html.document Js.t) ~(value : string)
 
 (* -- Port-based Client connection for popup pages -- *)
 
-let connect_port ~(tenant : string)
+let connect_port ~(name : string)
     ~(on_ready : Client.connection -> unit)
     ~(on_event : Client.event -> unit) : unit =
   Chrome_api.log "connect_port: calling chrome.runtime.connect()";
@@ -206,7 +206,7 @@ let connect_port ~(tenant : string)
     Chrome_api.log "connect_port: starting Client.init";
     Lwt.catch
       (fun () ->
-        let* (conn, events) = Client.init ~write ~read ~tenant () in
+        let* (conn, events) = Client.init ~write ~read ~name () in
         Chrome_api.log "connect_port: Client.init complete, connected";
         on_ready conn;
         let rec forward () =

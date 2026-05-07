@@ -48,8 +48,7 @@ let run ~url ~host ~port =
   let net = Eio.Stdenv.net env in
   Eio.Switch.run @@ fun sw ->
   let flow = connect_to_daemon ~sw net ~host ~port in
-  let tenant = "default" in
-  let frame = Protocol.make_request_frame Open { url } 1 tenant in
+  let frame = Protocol.make_request_frame Open { url } 1 in
   Eio.Flow.copy_string (Protocol.serialize_frame frame ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let response_line = Eio.Buf_read.line reader in
