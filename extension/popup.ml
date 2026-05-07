@@ -18,20 +18,20 @@ let page_is_internal = ref true
 
 (* -- Helpers -- *)
 
-let set_status (connected : bool) (text : string) : unit =
+let set_status connected text =
   Page_util.set_class status_dot
     (match connected with
      | true -> "dot connected"
      | false -> "dot disconnected");
   Page_util.set_text status_text text
 
-let set_footer ?(cls = "") (text : string) : unit =
+let set_footer ?(cls = "") text =
   Page_util.set_class footer cls;
   Page_util.set_text footer text
 
 (* -- Send page to tenant -- *)
 
-let send_page_to (conn : Client.connection) (tenant : string) : unit =
+let send_page_to conn tenant =
   Page_util.query_active_tab ~on_result:(fun url tab_id ->
     Lwt.async (fun () ->
       let* result = Client.call conn Open_on { target = tenant; url } in
@@ -46,7 +46,7 @@ let send_page_to (conn : Client.connection) (tenant : string) : unit =
 
 (* -- Render tenants -- *)
 
-let render_tenants (conn : Client.connection) (status : Protocol.status_info) (cfg : Protocol.config) (self_id : string) : unit =
+let render_tenants conn (status : Protocol.status_info) (cfg : Protocol.config) self_id =
   let registered_set =
     Set.of_list (module String) status.registered_tenants
   in
@@ -123,7 +123,7 @@ let render_tenants (conn : Client.connection) (status : Protocol.status_info) (c
 
 (* -- Load tenants on popup open -- *)
 
-let load_tenants (conn : Client.connection) : unit =
+let load_tenants conn =
   Page_util.query_active_tab ~on_result:(fun url _tab_id ->
     let is_internal = Page_util.is_internal_url url in
     page_is_internal := is_internal;

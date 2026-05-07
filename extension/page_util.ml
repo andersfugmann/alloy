@@ -6,8 +6,7 @@ let ( let* ) = Lwt.bind
 
 (* -- Chrome API wrappers -- *)
 
-let send_message (msg : Yojson.Safe.t)
-    ~(on_response : (Yojson.Safe.t, string) Result.t -> unit) : unit =
+let send_message msg ~on_response =
   Chrome_api.Runtime.send_message
     (Yojson.Safe.to_string msg)
     ~on_response:(fun err resp_str ->
@@ -36,21 +35,19 @@ let send_protocol_command : type req resp. (req, resp) Protocol.command -> req -
         in
         on_response parsed)
 
-let storage_get (keys : string list)
-    ~(on_result : (string * string) list -> unit) : unit =
+let storage_get keys ~on_result =
   Chrome_api.Storage.get_local keys ~on_result
 
-let storage_set (items : (string * string) list)
-    ~(on_done : unit -> unit) : unit =
+let storage_set items ~on_done =
   Chrome_api.Storage.set_local items ~on_done
 
-let create_tab (url : string) : unit =
+let create_tab url =
   Chrome_api.Tabs.create_url url
 
-let get_extension_url (path : string) : string =
+let get_extension_url path =
   Chrome_api.Runtime.get_url path
 
-let query_active_tab ~(on_result : string -> int -> unit) : unit =
+let query_active_tab ~on_result =
   Chrome_api.Tabs.query_active ~on_result
 
 let internal_url_prefixes =
@@ -60,7 +57,7 @@ let internal_url_prefixes =
 let is_internal_url url =
   List.exists internal_url_prefixes ~f:(fun prefix -> String.is_prefix url ~prefix)
 
-let validate_regexp (pattern : string) : (unit, string) Result.t =
+let validate_regexp pattern =
   match Regexp.regexp pattern with
   | _ -> Ok ()
   | exception Js_error.Exn e -> Error (Js_error.message e)
@@ -68,55 +65,55 @@ let validate_regexp (pattern : string) : (unit, string) Result.t =
 
 (* -- DOM helpers -- *)
 
-let get_by_id (id : string) : Dom_html.element Js.t =
+let get_by_id id : Dom_html.element Js.t =
   Dom_html.getElementById id
 
-let input_by_id (id : string) : Dom_html.inputElement Js.t =
+let input_by_id id : Dom_html.inputElement Js.t =
   let el = Dom_html.getElementById id in
   Js.Opt.get (Dom_html.CoerceTo.input el)
     (fun () -> failwith (Printf.sprintf "Element '%s' is not an input" id))
 
-let select_by_id (id : string) : Dom_html.selectElement Js.t =
+let select_by_id id : Dom_html.selectElement Js.t =
   let el = Dom_html.getElementById id in
   Js.Opt.get (Dom_html.CoerceTo.select el)
     (fun () -> failwith (Printf.sprintf "Element '%s' is not a select" id))
 
-let set_text (el : Dom_html.element Js.t) (text : string) : unit =
+let set_text (el : Dom_html.element Js.t) text =
   el##.textContent := Js.some (Js.string text)
 
-let set_html (el : Dom_html.element Js.t) (html : string) : unit =
+let set_html (el : Dom_html.element Js.t) html =
   el##.innerHTML := Js.string html
 
-let on_click (el : Dom_html.element Js.t) (f : unit -> unit) : unit =
+let on_click (el : Dom_html.element Js.t) f =
   el##.onclick := Dom_html.handler (fun _ev -> f (); Js._true)
 
 let set_timeout = Chrome_api.set_timeout
 
-let set_display (el : Dom_html.element Js.t) (value : string) : unit =
+let set_display (el : Dom_html.element Js.t) value =
   el##.style##.display := Js.string value
 
-let set_class (el : Dom_html.element Js.t) (cls : string) : unit =
+let set_class (el : Dom_html.element Js.t) cls =
   el##.className := Js.string cls
 
-let set_disabled (el : Dom_html.element Js.t) (disabled : bool) : unit =
+let set_disabled (el : Dom_html.element Js.t) disabled =
   match disabled with
   | true -> el##setAttribute (Js.string "disabled") (Js.string "")
   | false -> el##removeAttribute (Js.string "disabled")
 
-let add_class (el : Dom_html.element Js.t) (cls : string) : unit =
+let add_class (el : Dom_html.element Js.t) cls =
   let current = Js.to_string el##.className in
   match String.is_substring current ~substring:cls with
   | true -> ()
   | false -> el##.className := Js.string (current ^ " " ^ cls)
 
-let remove_class (el : Dom_html.element Js.t) (cls : string) : unit =
+let remove_class (el : Dom_html.element Js.t) cls =
   let current = Js.to_string el##.className in
   String.split current ~on:' '
   |> List.filter ~f:(fun c -> not (String.equal c cls))
   |> String.concat ~sep:" "
   |> fun s -> el##.className := Js.string s
 
-let escape_html (s : string) : string =
+let escape_html s =
   String.concat_map s ~f:(fun c ->
     match c with
     | '&' -> "&amp;"
@@ -126,7 +123,7 @@ let escape_html (s : string) : string =
     | '\'' -> "&#39;"
     | c -> String.of_char c)
 
-let escape_regexp (s : string) : string =
+let escape_regexp s =
   String.concat_map s ~f:(fun c ->
     match c with
     | '.' | '*' | '+' | '?' | '^' | '$'
@@ -134,8 +131,7 @@ let escape_regexp (s : string) : string =
       Printf.sprintf "[%c]" c
     | c -> String.of_char c)
 
-let bind_clicks (parent : Dom_html.element Js.t) ~(selector : string)
-    ~(attr : string) ~(f : string -> unit) : unit =
+let bind_clicks (parent : Dom_html.element Js.t) ~selector ~attr ~f =
   let nodes = parent##querySelectorAll (Js.string selector) in
   let len = nodes##.length in
   List.init len ~f:(fun i ->
@@ -152,7 +148,7 @@ let bind_clicks (parent : Dom_html.element Js.t) ~(selector : string)
         f v;
         Js._true))
 
-let get_search_param (key : string) : string option =
+let get_search_param key =
   let search = Js.to_string Dom_html.window##.location##.search in
   match String.is_prefix search ~prefix:"?" with
   | false -> None
@@ -165,7 +161,7 @@ let get_search_param (key : string) : string option =
         Some (Js.to_string (Js.decodeURIComponent (Js.string v)))
       | _ -> None)
 
-let url_origin (url_str : string) : string option =
+let url_origin url_str =
   match String.substr_index url_str ~pattern:"://" with
   | None -> None
   | Some scheme_end ->
@@ -177,8 +173,7 @@ let url_origin (url_str : string) : string option =
     in
     Some (String.prefix url_str path_start)
 
-let create_option (doc : Dom_html.document Js.t) ~(value : string)
-    ~(text : string) ~(selected : bool) : Dom_html.optionElement Js.t =
+let create_option (doc : Dom_html.document Js.t) ~value ~text ~selected =
   let opt = Dom_html.createOption doc in
   opt##.value := Js.string value;
   opt##.textContent := Js.some (Js.string text);
@@ -187,9 +182,7 @@ let create_option (doc : Dom_html.document Js.t) ~(value : string)
 
 (* -- Port-based Client connection for popup pages -- *)
 
-let connect_port ~(name : string)
-    ~(on_ready : Client.connection -> unit)
-    ~(on_event : Client.event -> unit) : unit =
+let connect_port ~name ~on_ready ~on_event =
   Chrome_api.log "connect_port: calling chrome.runtime.connect()";
   let port = Chrome_api.Runtime.connect () in
   Chrome_api.log "connect_port: port created, setting up listeners";

@@ -39,7 +39,7 @@ let rule_form_el = Page_util.get_by_id "ruleForm"
 
 (* -- Helpers -- *)
 
-let set_status (connected : bool) : unit =
+let set_status connected =
   let cls = match connected with true -> "ok" | false -> "err" in
   let badge_cls =
     match connected with true -> "connected" | false -> "disconnected"
@@ -57,7 +57,7 @@ let set_status (connected : bool) : unit =
          Page_util.set_class el
            (Printf.sprintf "status-badge %s" badge_cls))))
 
-let show_msg (text : string) (msg_type : string) : unit =
+let show_msg text msg_type =
   Page_util.set_text footer_msg text;
   Page_util.set_class footer_msg (Printf.sprintf "msg %s" msg_type);
   match String.equal msg_type "success" with
@@ -65,7 +65,7 @@ let show_msg (text : string) (msg_type : string) : unit =
     Page_util.set_timeout (fun () -> Page_util.set_text footer_msg "") 3000
   | false -> ()
 
-let browser_cmd_from_brand (brand : string option) : string =
+let browser_cmd_from_brand brand =
   match brand with
   | None -> ""
   | Some b ->
@@ -82,7 +82,7 @@ let browser_cmd_from_brand (brand : string option) : string =
 
 (* -- Populate select dropdowns -- *)
 
-let populate_rule_target (selected : string) : unit =
+let populate_rule_target selected =
   let sel = Page_util.select_by_id "rfTarget" in
   Page_util.set_html (sel :> Dom_html.element Js.t) "";
   let doc = Dom_html.document in
@@ -94,7 +94,7 @@ let populate_rule_target (selected : string) : unit =
     in
     Dom.appendChild sel opt)
 
-let populate_tenant_selects () : unit =
+let populate_tenant_selects () =
   let unmatched_sel = Page_util.select_by_id "dfUnmatched" in
   let current_val =
     let v = Js.to_string unmatched_sel##.value in
@@ -121,7 +121,7 @@ let populate_tenant_selects () : unit =
 
 (* -- Tenant CRUD -- *)
 
-let rec render_tenants () : unit =
+let rec render_tenants () =
   let tenants = !config.tenants in
   match List.is_empty tenants with
   | true ->
@@ -191,7 +191,7 @@ let rec render_tenants () : unit =
       ~selector:"[data-del-tenant]" ~attr:"data-del-tenant"
       ~f:delete_tenant
 
-and edit_tenant (id : string) : unit =
+and edit_tenant id =
   match List.Assoc.find !config.tenants ~equal:String.equal id with
   | None -> ()
   | Some t ->
@@ -212,7 +212,7 @@ and edit_tenant (id : string) : unit =
     Page_util.set_text (Page_util.get_by_id "tfSave") "Update tenant";
     Page_util.add_class tenant_form_el "visible"
 
-and delete_tenant (id : string) : unit =
+and delete_tenant id =
   config :=
     { !config with
       tenants =
@@ -222,7 +222,7 @@ and delete_tenant (id : string) : unit =
   fetch_and_render_rules ();
   populate_tenant_selects ()
 
-and save_tenant () : unit =
+and save_tenant () =
   let id = Js.to_string (Page_util.input_by_id "tfId")##.value |> String.strip in
   let label = Js.to_string (Page_util.input_by_id "tfLabel")##.value |> String.strip in
   let color = Js.to_string (Page_util.input_by_id "tfColor")##.value in
@@ -251,7 +251,7 @@ and save_tenant () : unit =
     render_tenants ();
     populate_tenant_selects ()
 
-and reset_tenant_form () : unit =
+and reset_tenant_form () =
   editing_tenant_id := None;
   let tf_id = Page_util.input_by_id "tfId" in
   tf_id##.value := Js.string "";
@@ -266,7 +266,7 @@ and reset_tenant_form () : unit =
 
 (* -- Rule CRUD -- *)
 
-and fetch_and_render_rules () : unit =
+and fetch_and_render_rules () =
   Page_util.send_protocol_command Get_rules ()
     ~on_response:(fun result ->
       match result with
@@ -274,7 +274,7 @@ and fetch_and_render_rules () : unit =
       | Error msg ->
         show_msg (Printf.sprintf "Failed to load rules: %s" msg) "error")
 
-and send_and_refetch_rules (updated : Protocol.rule list) : unit =
+and send_and_refetch_rules updated =
   Page_util.send_protocol_command Set_rules updated
     ~on_response:(fun result ->
       match result with
@@ -282,7 +282,7 @@ and send_and_refetch_rules (updated : Protocol.rule list) : unit =
       | Error msg ->
         show_msg (Printf.sprintf "Error saving rules: %s" msg) "error")
 
-and render_rules (rules : Protocol.rule list) : unit =
+and render_rules rules =
   let resolve_label target =
     match List.Assoc.find !config.tenants ~equal:String.equal target with
     | Some tc ->
@@ -356,7 +356,7 @@ and render_rules (rules : Protocol.rule list) : unit =
          | true ->
            send_and_refetch_rules (swap_nth idx rules)))
 
-and edit_rule (rules : Protocol.rule list) (idx : int) : unit =
+and edit_rule rules idx =
   match List.nth rules idx with
   | None -> ()
   | Some r ->
@@ -366,7 +366,7 @@ and edit_rule (rules : Protocol.rule list) (idx : int) : unit =
     Page_util.set_text (Page_util.get_by_id "rfSave") "Update rule";
     Page_util.add_class rule_form_el "visible"
 
-and save_rule () : unit =
+and save_rule () =
   let pattern =
     Js.to_string (Page_util.input_by_id "rfPattern")##.value |> String.strip
   in
@@ -404,7 +404,7 @@ and save_rule () : unit =
                 send_and_refetch_rules updated
               | Error msg -> show_msg (Printf.sprintf "Failed to fetch rules: %s" msg) "error")))
 
-and reset_rule_form () : unit =
+and reset_rule_form () =
   editing_rule_index := None;
   (Page_util.input_by_id "rfPattern")##.value := Js.string "";
   Page_util.set_text (Page_util.get_by_id "rfSave") "Add rule";
@@ -412,7 +412,7 @@ and reset_rule_form () : unit =
 
 (* -- Defaults -- *)
 
-let render_defaults () : unit =
+let render_defaults () =
   let d = !config.defaults in
   (Page_util.input_by_id "dfCooldown")##.value :=
     Js.string (Int.to_string d.cooldown_seconds);
@@ -420,7 +420,7 @@ let render_defaults () : unit =
     Js.string (Int.to_string d.browser_launch_timeout);
   populate_tenant_selects ()
 
-let read_defaults () : unit =
+let read_defaults () =
   let cooldown =
     Js.to_string (Page_util.input_by_id "dfCooldown")##.value
     |> Int.of_string_opt
@@ -441,7 +441,7 @@ let read_defaults () : unit =
 
 (* -- Save config -- *)
 
-let save_config () : unit =
+let save_config () =
   read_defaults ();
   show_msg "Saving\u{2026}" "";
   Page_util.send_protocol_command Set_config !config
@@ -452,7 +452,7 @@ let save_config () : unit =
 
 (* -- Fetch config + status -- *)
 
-let fetch_config () : unit =
+let fetch_config () =
   let pending = ref 3 in
   let config_ok = ref false in
   let rules_ok = ref false in

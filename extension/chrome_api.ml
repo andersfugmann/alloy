@@ -10,10 +10,10 @@ open Js_of_ocaml
 let global : _ Js.t = Js.Unsafe.global
 let chrome : _ Js.t = Js.Unsafe.get global (Js.string "chrome")
 
-let get (o : _ Js.t) (k : string) : _ Js.t =
+let get (o : _ Js.t) k : _ Js.t =
   Js.Unsafe.get o (Js.string k)
 
-let get_opt (o : _ Js.t) (k : string) : _ Js.t option =
+let get_opt (o : _ Js.t) k =
   let v : _ Js.Optdef.t = Js.Unsafe.get o (Js.string k) in
   Js.Optdef.to_option v
 
@@ -22,29 +22,28 @@ let call (o : _ Js.t) (m : string) (args : Js.Unsafe.any array) : 'a =
 
 let inject = Js.Unsafe.inject
 
-let js_obj (pairs : (string * Js.Unsafe.any) list) : _ Js.t =
+let js_obj pairs : _ Js.t =
   Js.Unsafe.obj (Array.of_list pairs)
 
-let add_listener (target : _ Js.t) (event_name : string)
-    (cb : Js.Unsafe.any) : unit =
+let add_listener (target : _ Js.t) event_name cb =
   call (get target event_name) "addListener" [| cb |]
 
 (* ── JSON interop ────────────────────────────────────────────────── *)
 
-let json_parse (s : string) : _ Js.t =
+let json_parse s : _ Js.t =
   Js._JSON##parse (Js.string s)
 
-let json_stringify (v : _ Js.t) : string =
+let json_stringify (v : _ Js.t) =
   Js.to_string (Js._JSON##stringify v)
 
-let safe_stringify (v : _ Js.t) : string =
+let safe_stringify (v : _ Js.t) =
   match Js.to_string (Js._JSON##stringify v) with
   | s -> s
   | exception _ -> "null"
 
 (* ── Console ─────────────────────────────────────────────────────── *)
 
-let log (msg : string) : unit =
+let log msg =
   Console.console##log (Js.string (Printf.sprintf "[alloy] %s" msg))
 
 (* ── performance.now() ───────────────────────────────────────────── *)
@@ -53,13 +52,13 @@ class type performance = object
   method now : Js.number Js.t Js.meth
 end
 
-let performance_now () : float =
+let performance_now () =
   let perf : performance Js.t = Js.Unsafe.coerce (get global "performance") in
   Js.float_of_number perf##now
 
 (* ── setTimeout ──────────────────────────────────────────────────── *)
 
-let set_timeout (f : unit -> unit) (ms : int) : unit =
+let set_timeout f ms =
   ignore
     (Js.Unsafe.meth_call global "setTimeout"
        [| inject (Js.wrap_callback f); inject ms |] : unit)
@@ -71,14 +70,14 @@ type port = < > Js.t
 (* ── Port operations ─────────────────────────────────────────────── *)
 
 module Port = struct
-  let post_message_json (p : port) (json_str : string) : unit =
+  let post_message_json (p : port) json_str =
     call p "postMessage" [| inject (json_parse json_str) |]
 
-  let on_message_json (p : port) (f : string -> unit) : unit =
+  let on_message_json (p : port) f =
     add_listener p "onMessage"
       (inject (Js.wrap_callback (fun msg -> f (json_stringify msg))))
 
-  let on_disconnect (p : port) (f : unit -> unit) : unit =
+  let on_disconnect (p : port) f =
     add_listener p "onDisconnect"
       (inject (Js.wrap_callback (fun _port -> f ())))
 end
@@ -88,11 +87,11 @@ end
 module Runtime = struct
   let rt : _ Js.t = get chrome "runtime"
 
-  let connect_native (app : string) : port =
+  let connect_native app : port =
     let p : _ Js.t = call rt "connectNative" [| inject (Js.string app) |] in
     Js.Unsafe.coerce p
 
-  let get_url (path : string) : string =
+  let get_url path =
     Js.to_string
       (call rt "getURL" [| inject (Js.string path) |] : Js.js_string Js.t)
 
@@ -100,14 +99,13 @@ module Runtime = struct
     method message : Js.js_string Js.t Js.readonly_prop
   end
 
-  let last_error () : string option =
+  let last_error () =
     match get_opt rt "lastError" with
     | None -> None
     | Some err ->
       Some (Js.to_string (Js.Unsafe.coerce err : runtime_error Js.t)##.message)
 
-  let send_message (msg_json : string)
-      ~(on_response : string -> string -> unit) : unit =
+  let send_message msg_json ~on_response =
     call rt "sendMessage"
       [| inject (json_parse msg_json);
          inject
@@ -120,15 +118,15 @@ module Runtime = struct
               let resp_str = safe_stringify response in
               on_response err resp_str)) |]
 
-  let on_installed (f : unit -> unit) : unit =
+  let on_installed f =
     add_listener rt "onInstalled"
       (inject (Js.wrap_callback (fun _details -> f ())))
 
-  let on_startup (f : unit -> unit) : unit =
+  let on_startup f =
     add_listener rt "onStartup"
       (inject (Js.wrap_callback (fun _unit -> f ())))
 
-  let on_message (f : string -> (string -> unit) -> unit) : unit =
+  let on_message f =
     add_listener rt "onMessage"
       (inject
          (Js.wrap_callback (fun msg _sender send_response ->
@@ -145,7 +143,7 @@ module Runtime = struct
     let p : _ Js.t = call rt "connect" [||] in
     Js.Unsafe.coerce p
 
-  let on_connect (f : port -> unit) : unit =
+  let on_connect f =
     add_listener rt "onConnect"
       (inject (Js.wrap_callback (fun (p : _ Js.t) ->
         f (Js.Unsafe.coerce p : port))))
@@ -156,13 +154,13 @@ end
 module Tabs = struct
   let tabs : _ Js.t = get chrome "tabs"
 
-  let create_url (url : string) : unit =
+  let create_url url =
     call tabs "create" [| inject (js_obj [ ("url", inject (Js.string url)) ]) |]
 
-  let remove (tab_id : int) : unit =
+  let remove tab_id =
     call tabs "remove" [| inject tab_id |]
 
-  let query_active ~(on_result : string -> int -> unit) : unit =
+  let query_active ~on_result =
     let query = js_obj [ ("active", inject Js._true); ("currentWindow", inject Js._true) ] in
     let cb = Js.wrap_callback (fun (tabs_arr : _ Js.t) ->
       let len : int = Js.Unsafe.get tabs_arr (Js.string "length") in
@@ -182,7 +180,7 @@ end
 module Action = struct
   let action : _ Js.t = get chrome "action"
 
-  let set_icon (path_16 : string) (path_48 : string) (path_128 : string) : unit =
+  let set_icon path_16 path_48 path_128 =
     let paths = js_obj [
       ("16", inject (Js.string path_16));
       ("48", inject (Js.string path_48));
@@ -196,7 +194,7 @@ end
 module Windows = struct
   let windows : _ Js.t = get chrome "windows"
 
-  let create_popup ~(url : string) ~(width : int) ~(height : int) : unit =
+  let create_popup ~url ~width ~height =
     call windows "create"
       [| inject
            (js_obj
@@ -213,8 +211,7 @@ end
 module Storage = struct
   let local () : _ Js.t = get (get chrome "storage") "local"
 
-  let get_local (keys : string list)
-      ~(on_result : (string * string) list -> unit) : unit =
+  let get_local keys ~on_result =
     let keys_arr =
       keys |> List.map ~f:Js.string |> Array.of_list |> Js.array
     in
@@ -231,8 +228,7 @@ module Storage = struct
               in
               on_result pairs)) |]
 
-  let set_local (items : (string * string) list)
-      ~(on_done : unit -> unit) : unit =
+  let set_local items ~on_done =
     let obj =
       js_obj
         (List.map items ~f:(fun (k, v) -> (k, inject (Js.string v))))
@@ -249,8 +245,7 @@ module Context_menus = struct
     [| "http://*/*"; "https://*/*" |]
     |> Array.map ~f:Js.string |> Js.array
 
-  let create ~(id : string) ~(title : string)
-      ~(contexts : string list) : unit =
+  let create ~id ~title ~contexts =
     let contexts_arr =
       contexts |> List.map ~f:Js.string |> Array.of_list |> Js.array
     in
@@ -264,8 +259,7 @@ module Context_menus = struct
                 ("documentUrlPatterns", inject web_url_patterns);
               ]) |]
 
-  let create_child ~(id : string) ~(parent_id : string)
-      ~(title : string) ~(contexts : string list) ?(enabled = true) () : unit =
+  let create_child ~id ~parent_id ~title ~contexts ?(enabled = true) () =
     let contexts_arr =
       contexts |> List.map ~f:Js.string |> Array.of_list |> Js.array
     in
@@ -281,7 +275,7 @@ module Context_menus = struct
                 ("enabled", inject (Js.bool enabled));
               ]) |]
 
-  let remove_all (f : unit -> unit) : unit =
+  let remove_all f =
     call (menus ()) "removeAll" [| inject (Js.wrap_callback f) |]
 
   class type click_info = object
@@ -294,7 +288,7 @@ module Context_menus = struct
     method id : int Js.Optdef.t Js.readonly_prop
   end
 
-  let on_clicked (f : string -> string -> string -> int option -> unit) : unit =
+  let on_clicked f =
     add_listener (menus ()) "onClicked"
       (inject
          (Js.wrap_callback (fun (info : click_info Js.t) (tab : tab_info Js.t) ->
@@ -324,7 +318,7 @@ module Web_navigation = struct
     method frameId : int Js.readonly_prop
   end
 
-  let on_before_navigate (f : string -> int -> int -> unit) : unit =
+  let on_before_navigate f =
     add_listener (nav ()) "onBeforeNavigate"
       (inject
          (Js.wrap_callback (fun (details : nav_details Js.t) ->
@@ -334,7 +328,7 @@ end
 (* ── Navigator (browser brand detection) ─────────────────────────── *)
 
 module Navigator = struct
-  let is_grease_brand (b : string) : bool =
+  let is_grease_brand b =
     String.is_prefix b ~prefix:"Not"
 
   class type brand_entry = object
@@ -350,7 +344,7 @@ module Navigator = struct
     method userAgent : Js.js_string Js.t Js.readonly_prop
   end
 
-  let brand_from_user_agent (ua : string) : string =
+  let brand_from_user_agent ua =
     let ua_lower = String.lowercase ua in
     let candidates =
       [ ("edg/", "Microsoft Edge");
@@ -366,7 +360,7 @@ module Navigator = struct
         | false -> None)
     |> Option.value ~default:""
 
-  let brand_from_ua_data (uad : user_agent_data Js.t) : string =
+  let brand_from_ua_data (uad : user_agent_data Js.t) =
     Js.Optdef.case uad##.brands
       (fun () -> "")
       (fun arr ->
@@ -391,7 +385,7 @@ module Navigator = struct
             | b :: _ -> b
             | [] -> ""))
 
-  let get_browser_brand () : string =
+  let get_browser_brand () =
     match get_opt global "navigator" with
     | None -> ""
     | Some nav_js ->

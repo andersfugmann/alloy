@@ -51,7 +51,7 @@ type state = {
 
 (* -- Event stream *)
 
-let (event_stream : event Lwt_stream.t), push_event =
+let (event_stream, push_event) =
   Lwt_stream.create ()
 
 let push ev = push_event (Some ev)
@@ -68,15 +68,15 @@ let initial_state = {
   subclient_next_id = 1;
 }
 
-let debug (state : state) (msg : string) : unit =
+let debug state msg =
   match state.debug_logging with
   | true -> log msg
   | false -> ()
 
-let is_connected (state : state) : bool =
+let is_connected state =
   Option.is_some state.connection
 
-let update_badge (connected : bool) : unit =
+let update_badge connected =
   match connected with
   | true ->
     Chrome_api.Action.set_icon
@@ -100,7 +100,7 @@ let call : type req resp. state -> (req, resp) Protocol.command -> req ->
 
 (* -- JSON helpers *)
 
-let string_field (json : Yojson.Safe.t) (key : string) : (string, string) Result.t =
+let string_field json key =
   match json with
   | `Assoc pairs ->
     (match List.Assoc.find pairs ~equal:String.equal key with
@@ -111,12 +111,12 @@ let string_field (json : Yojson.Safe.t) (key : string) : (string, string) Result
 
 (* -- Connection management *)
 
-let non_empty (s : string) : string option =
+let non_empty s =
   match String.is_empty s with
   | true -> None
   | false -> Some s
 
-let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
+let connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
   let write msg = Chrome_api.Port.post_message_json port msg in
   let (read, push_incoming) = Lwt_stream.create () in
@@ -170,7 +170,7 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
   { connection = None; tenant_names = []; self_tenant_id = None; debug_logging;
     subclient_ports = []; subclient_pending = Map.empty (module Int); subclient_next_id = 1 }
 
-let connect (_state : state) : state =
+let connect _state =
   match
     let p = Chrome_api.Runtime.connect_native "alloy" in
     log "Connected to native messaging host";
@@ -200,7 +200,7 @@ let connect (_state : state) : state =
 
 (* -- Event handlers (return state Lwt.t, use let* for commands) *)
 
-let handle_push (state : state) (p : Protocol.push) : state =
+let handle_push state (p : Protocol.push) =
   match p with
   | Navigate { url } ->
     log (Printf.sprintf "Received NAVIGATE push: %s" url);
@@ -219,7 +219,7 @@ let handle_push (state : state) (p : Protocol.push) : state =
     push (Refresh_menus { tenants });
     state
 
-let handle_navigation (state : state) (url : string) (tab_id : int) : state Lwt.t =
+let handle_navigation state url tab_id =
   match is_connected state && not (is_internal_url url) with
   | false -> Lwt.return state
   | true ->
@@ -236,8 +236,7 @@ let handle_navigation (state : state) (url : string) (tab_id : int) : state Lwt.
      | Error msg -> log (Printf.sprintf "Open error: %s" msg));
     Lwt.return state
 
-let delete_matching_rule (state : state) (url : string)
-    : (unit, string) Result.t Lwt.t =
+let delete_matching_rule state url =
   let* result = call state Test { url } in
   match result with
   | Ok (Protocol.Match { rule_index; _ }) ->
@@ -251,8 +250,7 @@ let delete_matching_rule (state : state) (url : string)
   | Ok (No_match _) -> Lwt.return (Error "No matching rule")
   | Error msg -> Lwt.return (Error msg)
 
-let handle_context_menu (state : state) (menu_id : string)
-    (link_url : string) (page_url : string) (tab_id : int option) : state Lwt.t =
+let handle_context_menu state menu_id link_url page_url tab_id =
   let effective_url =
     match String.is_empty link_url with
     | true -> page_url
@@ -296,8 +294,7 @@ let handle_context_menu (state : state) (menu_id : string)
        Lwt.return state)
   | _ -> Lwt.return state
 
-let handle_local_action (state : state) (json : Yojson.Safe.t)
-    (respond : Yojson.Safe.t -> unit) : state Lwt.t =
+let handle_local_action state json respond =
   match string_field json "action" with
   | Ok "reconnect" ->
     let state = connect state in
@@ -327,8 +324,7 @@ let handle_local_action (state : state) (json : Yojson.Safe.t)
     respond (`Assoc [ ("error", `String "invalid message") ]);
     Lwt.return state
 
-let handle_popup_query (state : state) (json : Yojson.Safe.t)
-    (respond : Yojson.Safe.t -> unit) : state Lwt.t =
+let handle_popup_query state json respond =
   let parsed =
     Result.bind (Protocol.frame_of_yojson json) ~f:Protocol.parse_request_payload
   in
@@ -344,7 +340,7 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
       respond (Protocol.frame_to_yojson resp_frame);
       Lwt.return state
 
-let setup_context_menus (tenants : (string * string * bool) list) (self_id : string option) : unit =
+let setup_context_menus tenants self_id =
   remove_all_context_menus (fun () ->
     create_context_menu ~id:"open_in" ~title:"Open link in" ~contexts:[ "link" ];
     create_context_menu ~id:"send_to" ~title:"Send page" ~contexts:[ "page" ];
@@ -366,7 +362,7 @@ let setup_context_menus (tenants : (string * string * bool) list) (self_id : str
     create_context_menu ~id:"add_rule" ~title:"Add rule" ~contexts:[ "page"; "link" ];
     create_context_menu ~id:"delete_rule" ~title:"Delete matching rule" ~contexts:[ "page"; "link" ])
 
-let handle_event (state : state) (event : event) : state Lwt.t =
+let handle_event state event =
   match event with
   | Navigation { url; tab_id } -> handle_navigation state url tab_id
   | Bridge_event (Push p) -> Lwt.return (handle_push state p)
@@ -464,7 +460,7 @@ let handle_event (state : state) (event : event) : state Lwt.t =
 
 (* -- Coordinator loop *)
 
-let rec coordinator (state : state) : unit Lwt.t =
+let rec coordinator state =
   let* event = Lwt_stream.next event_stream in
   let* state = handle_event state event in
   update_badge (Option.is_some state.self_tenant_id);
@@ -472,7 +468,7 @@ let rec coordinator (state : state) : unit Lwt.t =
 
 (* -- Chrome event registration *)
 
-let register_chrome_listeners () : unit =
+let register_chrome_listeners () =
   on_before_navigate (fun url tab_id frame_id ->
       match frame_id with
       | 0 -> push (Navigation { url; tab_id })
