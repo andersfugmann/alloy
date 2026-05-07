@@ -12,11 +12,18 @@
  (preprocess
   (pps js_of_ocaml-ppx)))
 
+(library
+ (name multiplexer)
+ (modules multiplexer)
+ (libraries chrome_api client protocol lwt base stdio)
+ (preprocess
+  (pps js_of_ocaml-ppx)))
+
 (executable
  (name main)
  (modules main)
  (modes js)
- (libraries chrome_api client page_util protocol constants js_of_ocaml lwt base stdio yojson)
+ (libraries chrome_api client multiplexer page_util protocol constants js_of_ocaml lwt base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))
