@@ -1,4 +1,4 @@
-.PHONY: build test test-extension clean fmt lint install deb help deps
+.PHONY: build test test-extension clean fmt lint install deb help deps dev-extension
 
 .DEFAULT_GOAL := build
 
@@ -21,6 +21,21 @@ deps: _build/node_modules/.stamp ## Install node dependencies
 
 test-extension: build _build/node_modules/.stamp ## Build and run extension tests
 	cd extension && NODE_PATH=../_build/node_modules ../_build/node_modules/.bin/jest --forceExit
+
+dev-extension: build ## Stage unpacked extension in _build/dev-extension
+	dune build extension/main.js extension/popup.js extension/config.js \
+		extension/options.js extension/add_rule.js
+	mkdir -p _build/dev-extension/icons
+	cp extension/manifest.json extension/popup.html extension/add_rule.html \
+		extension/config.html extension/options.html _build/dev-extension/
+	cp _build/default/extension/main.js _build/dev-extension/
+	cp _build/default/extension/popup.js _build/dev-extension/
+	cp _build/default/extension/config.js _build/dev-extension/
+	cp _build/default/extension/options.js _build/dev-extension/
+	cp _build/default/extension/add_rule.js _build/dev-extension/
+	cp extension/icons/* _build/dev-extension/icons/
+	@echo "Extension staged in _build/dev-extension/"
+	@echo "Load as unpacked extension in chrome://extensions"
 
 clean: ## Clean build artifacts
 	dune clean
