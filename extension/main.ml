@@ -478,9 +478,13 @@ let register_chrome_listeners () : unit =
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       push (Context_menu { menu_id; link_url; page_url; tab_id }));
   Chrome_api.Runtime.on_connect (fun port ->
+    log "Port connected";
     Chrome_api.Port.on_message_json port (fun raw ->
+      log (Printf.sprintf "Port raw message: %s"
+        (String.prefix raw 200));
       match Protocol.deserialize_frame raw with
-      | Error _msg -> ()
+      | Error msg ->
+        log (Printf.sprintf "Port frame parse error: %s" msg)
       | Ok frame ->
         push (Page_port_message { port; raw; frame }));
     Chrome_api.Port.on_disconnect port (fun () ->
