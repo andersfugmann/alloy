@@ -162,6 +162,7 @@ type push =
 type bridge_request = {
   msg : string;
   address : listen_address; [@key "payload"]
+  debug : bool;
 }
 [@@deriving yojson]
 
@@ -188,8 +189,8 @@ type bridge_response = {
 }
 [@@deriving yojson]
 
-let make_bridge_request (addr : listen_address) : bridge_request =
-  { msg = "connect"; address = addr }
+let make_bridge_request ~debug (addr : listen_address) : bridge_request =
+  { msg = "connect"; address = addr; debug }
 
 let make_bridge_connected (hostname : string) : bridge_response =
   { msg = "connected"; result = Connected { status = "connected"; hostname } }
@@ -197,11 +198,11 @@ let make_bridge_connected (hostname : string) : bridge_response =
 let make_bridge_error (error : string) : bridge_response =
   { msg = "connected"; result = Bridge_error { status = "error"; error } }
 
-let parse_bridge_request (json : Yojson.Safe.t) : (listen_address, string) Result.t =
+let parse_bridge_request (json : Yojson.Safe.t) : (listen_address * bool, string) Result.t =
   match bridge_request_of_yojson json with
   | Ok req ->
     begin match String.equal req.msg "connect" with
-    | true -> Ok req.address
+    | true -> Ok (req.address, req.debug)
     | false -> Error (Printf.sprintf "expected msg=connect, got %s" req.msg)
     end
   | Error e -> Error e

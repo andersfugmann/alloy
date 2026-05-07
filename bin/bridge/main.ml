@@ -1,7 +1,11 @@
 open! Base
 open! Stdio
 
-let log msg = Stdlib.Printf.eprintf "[alloy_bridge] %s\n%!" msg
+let debug_enabled = ref false
+let log msg =
+  match !debug_enabled with
+  | true -> Stdlib.Printf.eprintf "[alloy_bridge] %s\n%!" msg
+  | false -> ()
 
 (* -- Native messaging I/O (Chrome length-prefixed format) *)
 
@@ -65,7 +69,9 @@ let run env =
       | Some json ->
         log (Stdlib.Printf.sprintf "received: %s" (Yojson.Safe.to_string json));
         match Protocol.parse_bridge_request json with
-        | Ok addr -> Some addr
+        | Ok (addr, debug) ->
+          debug_enabled := debug;
+          Some addr
         | Error msg ->
           send_error msg;
           await ()

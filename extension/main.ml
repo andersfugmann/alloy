@@ -138,7 +138,7 @@ let connect_with_settings port tenant_name daemon_host daemon_port ~debug_loggin
   (* Send bridge handshake, then init client *)
   Lwt.async (fun () ->
     let addr : Protocol.listen_address = { host; port = port_num } in
-    let req = Protocol.make_bridge_request addr in
+    let req = Protocol.make_bridge_request ~debug:debug_logging addr in
     write (Yojson.Safe.to_string (Protocol.bridge_request_to_yojson req));
     (* Wait for bridge response *)
     let* raw = Lwt_stream.next read in
