@@ -98,7 +98,7 @@ let run env =
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp));
       let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
       (* Transparent relay *)
-      Eio.Fiber.both
+      Eio.Fiber.first
         (fun () ->
           let rec read_tcp () =
             let line = Eio.Buf_read.line reader in
@@ -110,8 +110,7 @@ let run env =
           let rec read_stdin () =
             match read_native_message_raw stdin_flow with
             | None ->
-              log "stdin closed, shutting down";
-              ()
+              log "stdin closed, shutting down"
             | Some data ->
               Eio.Flow.copy_string (data ^ "\n") flow;
               read_stdin ()
@@ -125,6 +124,6 @@ let run env =
       Eio.Stream.add stdout_stream
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
   in
-  Eio.Fiber.both write_stdout relay
+  Eio.Fiber.first write_stdout relay
 
 let () = Eio_main.run run
