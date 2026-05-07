@@ -8,7 +8,7 @@
 (library
  (name page_util)
  (modules page_util)
- (libraries chrome_api protocol constants js_of_ocaml base stdio)
+ (libraries chrome_api client protocol constants js_of_ocaml lwt base stdio)
  (preprocess
   (pps js_of_ocaml-ppx)))
 
@@ -34,7 +34,7 @@
  (names popup config_page options_page add_rule_page)
  (modules popup config_page options_page add_rule_page)
  (modes js)
- (libraries chrome_api page_util protocol constants js_of_ocaml base stdio yojson)
+ (libraries chrome_api client page_util protocol constants js_of_ocaml lwt base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))

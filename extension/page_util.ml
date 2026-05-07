@@ -2,6 +2,8 @@ open! Base
 open! Stdio
 open Js_of_ocaml
 
+let ( let* ) = Lwt.bind
+
 (* -- Chrome API wrappers -- *)
 
 let send_message (msg : Yojson.Safe.t)
@@ -182,3 +184,23 @@ let create_option (doc : Dom_html.document Js.t) ~(value : string)
   opt##.textContent := Js.some (Js.string text);
   opt##.selected := Js.bool selected;
   opt
+
+(* -- Port-based Client connection for popup pages -- *)
+
+let connect_port ~(tenant : string)
+    ~(on_ready : Client.connection -> unit)
+    ~(on_event : Client.event -> unit) : unit =
+  let port = Chrome_api.Runtime.connect () in
+  let write msg = Chrome_api.Port.post_message_json port msg in
+  let (read, push_incoming) = Lwt_stream.create () in
+  Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
+  Chrome_api.Port.on_disconnect port (fun () -> push_incoming None);
+  Lwt.async (fun () ->
+    let* (conn, events) = Client.init ~write ~read ~tenant () in
+    on_ready conn;
+    let rec forward () =
+      let* ev = Lwt_stream.next events in
+      on_event ev;
+      forward ()
+    in
+    Lwt.catch forward (fun _exn -> Lwt.return_unit))

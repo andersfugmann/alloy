@@ -50,6 +50,8 @@ let (event_stream : event Lwt_stream.t), push_event =
 
 let push ev = push_event (Some ev)
 
+let mux = Multiplexer.create ()
+
 (* -- State operations *)
 
 let initial_state = { connection = None; tenant_names = []; self_tenant_id = None; debug_logging = false }
@@ -336,6 +338,7 @@ let handle_event (state : state) (event : event) : state Lwt.t =
     Lwt.return (connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging)
   | Connection_ready conn ->
     log (Printf.sprintf "Registered as tenant: %s" (Client.tenant_name conn));
+    Multiplexer.start mux conn;
     Lwt.return { state with connection = Some conn; self_tenant_id = Some (Client.tenant_name conn) }
   | Context_menu { menu_id; link_url; page_url; tab_id } ->
     handle_context_menu state menu_id link_url page_url tab_id
