@@ -1,6 +1,8 @@
 open! Base
 open! Stdio
 
+let log msg = Stdlib.Printf.eprintf "[alloy_bridge] %s\n%!" msg
+
 (* -- Native messaging I/O (Chrome length-prefixed format) *)
 
 let read_native_message_raw source : string option =
@@ -41,20 +43,26 @@ let connect_to_daemon ~sw net ~host ~port =
 let run env =
   let net = Eio.Stdenv.net env in
   let hostname = Unix.gethostname () in
+  log (Stdlib.Printf.sprintf "starting (hostname=%s, pid=%d)" hostname (Unix.getpid ()));
   let stdin_flow = Eio.Stdenv.stdin env in
   let stdout_flow = Eio.Stdenv.stdout env in
   let stdout_stream = Eio.Stream.create Constants.bridge_stream_capacity in
   (* Phase 1: Wait for connect handshake from extension *)
   let handshake () : Protocol.listen_address option =
     let send_error msg =
+      log (Stdlib.Printf.sprintf "handshake error: %s" msg);
       let resp = Protocol.make_bridge_error msg in
       write_native_message_raw stdout_flow
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
     in
+    log "waiting for handshake";
     let rec await () =
       match read_native_message stdin_flow with
-      | None -> None
+      | None ->
+        log "stdin closed before handshake";
+        None
       | Some json ->
+        log (Stdlib.Printf.sprintf "received: %s" (Yojson.Safe.to_string json));
         match Protocol.parse_bridge_request json with
         | Ok addr -> Some addr
         | Error msg ->
@@ -64,10 +72,11 @@ let run env =
     await ()
   in
   match handshake () with
-  | None -> ()
+  | None -> log "exiting (no handshake)"
   | Some addr ->
   let host = addr.host in
   let port = addr.port in
+  log (Stdlib.Printf.sprintf "connecting to daemon at %s:%d" host port);
   (* Phase 2: Connect to daemon *)
   let write_stdout () =
     let rec loop () =
@@ -81,6 +90,7 @@ let run env =
     match
       Eio.Switch.run @@ fun sw ->
       let flow = connect_to_daemon ~sw net ~host ~port in
+      log "connected to daemon";
       (* Send connected response to extension *)
       let resp = Protocol.make_bridge_connected hostname in
       Eio.Stream.add stdout_stream
@@ -98,15 +108,18 @@ let run env =
         (fun () ->
           let rec read_stdin () =
             match read_native_message_raw stdin_flow with
-            | None -> ()
+            | None ->
+              log "stdin closed, shutting down";
+              ()
             | Some data ->
               Eio.Flow.copy_string (data ^ "\n") flow;
               read_stdin ()
           in
           read_stdin ())
     with
-    | () -> ()
+    | () -> log "relay finished"
     | exception exn ->
+      log (Stdlib.Printf.sprintf "relay error: %s" (Exn.to_string exn));
       let resp = Protocol.make_bridge_error (Exn.to_string exn) in
       Eio.Stream.add stdout_stream
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
