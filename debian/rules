@@ -5,6 +5,7 @@
 
 override_dh_auto_build:
 	dune build --profile release bin/server/main.exe bin/client/main.exe \
+		bin/bridge/main.exe \
 		extension/main.bc.js extension/popup.bc.js extension/config_page.bc.js \
 		extension/options_page.bc.js extension/add_rule_page.bc.js
 	mkdir -p _build/ext-staging/icons
@@ -22,7 +23,9 @@ override_dh_auto_install:
 	install -D -m 755 _build/default/bin/server/main.exe \
 		debian/alloyd/usr/bin/alloyd
 	install -D -m 755 _build/default/bin/client/main.exe \
-		debian/alloy/usr/bin/alloy
+		debian/alloy/usr/bin/alloy_open
+	install -D -m 755 _build/default/bin/bridge/main.exe \
+		debian/alloy/usr/bin/alloy_bridge
 	# Canonical native messaging manifest
 	install -D -m 644 debian/alloy.json \
 		debian/alloy/usr/share/alloy/alloy.json

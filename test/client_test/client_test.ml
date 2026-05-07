@@ -273,28 +273,30 @@ let test_subclient_push_broadcast _switch () =
 let () =
   let d = Test_harness.start () in
   daemon := Some d;
-  Lwt_main.run
-    (Alcotest_lwt.run "client-integration" [
-       ("registration", [
-          Alcotest_lwt.test_case "anonymous" `Quick test_registration;
-          Alcotest_lwt.test_case "named tenant" `Quick test_registration_with_tenant;
-        ]);
-       ("commands", [
-          Alcotest_lwt.test_case "status" `Quick test_status;
-          Alcotest_lwt.test_case "get_config" `Quick test_get_config;
-          Alcotest_lwt.test_case "get_rules" `Quick test_get_rules;
-          Alcotest_lwt.test_case "set_rules" `Quick test_set_rules;
-        ]);
-       ("routing", [
-          Alcotest_lwt.test_case "redirect" `Quick test_redirect;
-          Alcotest_lwt.test_case "no redirect" `Quick test_no_redirect;
-          Alcotest_lwt.test_case "self-open forced local" `Quick test_self_open;
-          Alcotest_lwt.test_case "cooldown" `Slow test_cooldown;
-        ]);
-       ("subclient", [
-          Alcotest_lwt.test_case "relay status" `Quick test_subclient_status;
-          Alcotest_lwt.test_case "id rewriting" `Quick test_subclient_id_rewriting;
-          Alcotest_lwt.test_case "push broadcast" `Quick test_subclient_push_broadcast;
-        ]);
-     ]);
-  Test_harness.stop d
+  Exn.protect
+    ~f:(fun () ->
+      Lwt_main.run
+        (Alcotest_lwt.run "client-integration" [
+           ("registration", [
+              Alcotest_lwt.test_case "anonymous" `Quick test_registration;
+              Alcotest_lwt.test_case "named tenant" `Quick test_registration_with_tenant;
+            ]);
+           ("commands", [
+              Alcotest_lwt.test_case "status" `Quick test_status;
+              Alcotest_lwt.test_case "get_config" `Quick test_get_config;
+              Alcotest_lwt.test_case "get_rules" `Quick test_get_rules;
+              Alcotest_lwt.test_case "set_rules" `Quick test_set_rules;
+            ]);
+           ("routing", [
+              Alcotest_lwt.test_case "redirect" `Quick test_redirect;
+              Alcotest_lwt.test_case "no redirect" `Quick test_no_redirect;
+              Alcotest_lwt.test_case "self-open forced local" `Quick test_self_open;
+              Alcotest_lwt.test_case "cooldown" `Slow test_cooldown;
+            ]);
+           ("subclient", [
+              Alcotest_lwt.test_case "relay status" `Quick test_subclient_status;
+              Alcotest_lwt.test_case "id rewriting" `Quick test_subclient_id_rewriting;
+              Alcotest_lwt.test_case "push broadcast" `Quick test_subclient_push_broadcast;
+            ]);
+         ]))
+    ~finally:(fun () -> Test_harness.stop d)

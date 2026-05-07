@@ -1,7 +1,7 @@
 {
   "name": "alloy",
   "description": "Alloy native messaging host",
-  "path": "/usr/bin/alloy",
+  "path": "/usr/bin/alloy_bridge",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://jhejkohfkfaeidbbnhjkicadefnapedo/"
