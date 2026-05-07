@@ -48,7 +48,7 @@ let run env =
   let handshake () : Protocol.listen_address option =
     let send_error msg =
       let resp = Protocol.make_bridge_error msg in
-      Eio.Stream.add stdout_stream
+      write_native_message_raw stdout_flow
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
     in
     let rec await () =
