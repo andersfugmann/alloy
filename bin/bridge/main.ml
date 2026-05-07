@@ -35,7 +35,8 @@ let write_native_message_raw sink (data : string) : unit =
 (* -- TCP connection *)
 
 let connect_to_daemon ~sw net ~host ~port =
-  let addr = `Tcp (Eio.Net.Ipaddr.of_raw host, port) in
+  let ip = Eio_unix.Net.Ipaddr.of_unix (Unix.inet_addr_of_string host) in
+  let addr = `Tcp (ip, port) in
   Eio.Net.connect ~sw net addr
 
 (* -- Main bridge logic *)

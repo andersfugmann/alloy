@@ -35,12 +35,17 @@ type event =
   | Popup_query of { json : Yojson.Safe.t; respond : Yojson.Safe.t -> unit }
   | Setup_menus
   | Refresh_menus of { tenants : (string * string * bool) list }
+  | Page_port_message of { port : Chrome_api.port; raw : string; frame : Protocol.frame }
+  | Page_port_disconnected of { port : Chrome_api.port }
+  | Subclient_response of string
 
 type state = {
   connection : Client.connection option;
   tenant_names : (string * string * bool) list;
   self_tenant_id : string option;
   debug_logging : bool;
+  ports : Chrome_api.port Map.M(String).t;
+  port_counter : int;
 }
 
 (* -- Event stream *)
@@ -50,11 +55,16 @@ let (event_stream : event Lwt_stream.t), push_event =
 
 let push ev = push_event (Some ev)
 
-let mux = Multiplexer.create ()
-
 (* -- State operations *)
 
-let initial_state = { connection = None; tenant_names = []; self_tenant_id = None; debug_logging = false }
+let initial_state = {
+  connection = None;
+  tenant_names = [];
+  self_tenant_id = None;
+  debug_logging = false;
+  ports = Map.empty (module String);
+  port_counter = 0;
+}
 
 let debug (state : state) (msg : string) : unit =
   match state.debug_logging with
@@ -155,7 +165,8 @@ let connect_with_settings (port : native_port) (tenant_name : string) (daemon_ho
       forward ()
     in
     Lwt.catch forward (fun _exn -> Lwt.return_unit));
-  { connection = None; tenant_names = []; self_tenant_id = None; debug_logging }
+  { connection = None; tenant_names = []; self_tenant_id = None; debug_logging;
+    ports = Map.empty (module String); port_counter = 0 }
 
 let connect (_state : state) : state =
   match
@@ -369,7 +380,14 @@ let handle_event (state : state) (event : event) : state Lwt.t =
     Lwt.return (connect_with_settings port tenant_name daemon_host daemon_port ~debug_logging)
   | Connection_ready conn ->
     log (Printf.sprintf "Registered as tenant: %s" (Client.tenant_name conn));
-    Multiplexer.start mux conn;
+    Lwt.async (fun () ->
+      let stream = Client.subclient_read conn in
+      let rec forward () =
+        let* raw = Lwt_stream.next stream in
+        push (Subclient_response raw);
+        forward ()
+      in
+      Lwt.catch forward (fun _exn -> Lwt.return_unit));
     Lwt.return { state with connection = Some conn; self_tenant_id = Some (Client.tenant_name conn) }
   | Context_menu { menu_id; link_url; page_url; tab_id } ->
     handle_context_menu state menu_id link_url page_url tab_id
@@ -380,6 +398,57 @@ let handle_event (state : state) (event : event) : state Lwt.t =
   | Refresh_menus { tenants } ->
     setup_context_menus tenants state.self_tenant_id;
     Lwt.return { state with tenant_names = tenants }
+  | Page_port_message { port; raw; frame } ->
+    begin match Multiplexer.is_register_frame frame with
+    | true ->
+      let desired =
+        match String.is_empty frame.tenant with
+        | true -> "anonymous"
+        | false -> frame.tenant
+      in
+      let tenant_id = Multiplexer.assign_tenant_id state.ports desired state.port_counter in
+      let registered_frame = Protocol.make_push_frame (Registered { tenant_id }) in
+      Chrome_api.Port.post_message_json port (Protocol.serialize_frame registered_frame);
+      Lwt.return { state with
+        ports = Map.set state.ports ~key:tenant_id ~data:port;
+        port_counter = state.port_counter + 1 }
+    | false ->
+      Option.iter state.connection ~f:(fun conn ->
+        Client.subclient_write conn raw);
+      Lwt.return state
+    end
+  | Page_port_disconnected { port } ->
+    let tenant_id =
+      Map.fold state.ports ~init:None ~f:(fun ~key ~data acc ->
+        match acc with
+        | Some _ -> acc
+        | None ->
+          match phys_equal data port with
+          | true -> Some key
+          | false -> acc)
+    in
+    begin match tenant_id with
+    | Some tid -> Lwt.return { state with ports = Map.remove state.ports tid }
+    | None -> Lwt.return state
+    end
+  | Subclient_response raw ->
+    begin match Protocol.deserialize_frame raw with
+    | Error _msg -> ()
+    | Ok frame ->
+      begin match frame.id with
+      | 0 ->
+        Map.iter state.ports ~f:(fun port ->
+          Chrome_api.Port.post_message_json port raw)
+      | _ ->
+        begin match String.is_empty frame.tenant with
+        | true -> ()
+        | false ->
+          Option.iter (Map.find state.ports frame.tenant) ~f:(fun port ->
+            Chrome_api.Port.post_message_json port raw)
+        end
+      end
+    end;
+    Lwt.return state
 
 (* -- Coordinator loop *)
 
@@ -398,6 +467,14 @@ let register_chrome_listeners () : unit =
       | _ -> ());
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       push (Context_menu { menu_id; link_url; page_url; tab_id }));
+  Chrome_api.Runtime.on_connect (fun port ->
+    Chrome_api.Port.on_message_json port (fun raw ->
+      match Protocol.deserialize_frame raw with
+      | Error _msg -> ()
+      | Ok frame ->
+        push (Page_port_message { port; raw; frame }));
+    Chrome_api.Port.on_disconnect port (fun () ->
+      push (Page_port_disconnected { port })));
   Chrome_api.Runtime.on_message (fun msg_str respond ->
      match Protocol.parse_json_string msg_str with
      | Error _ ->
