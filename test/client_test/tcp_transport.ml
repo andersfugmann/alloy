@@ -32,8 +32,11 @@ let connect ~host ~port =
   (* write sends via Lwt_io and flushes asynchronously *)
   let write msg =
     Lwt.async (fun () ->
-      let* () = Lwt_io.write_line oc msg in
-      Lwt_io.flush oc)
+      Lwt.catch
+        (fun () ->
+          let* () = Lwt_io.write_line oc msg in
+          Lwt_io.flush oc)
+        (fun _exn -> Lwt.return_unit))
   in
   Lwt.return { lwt_fd; read; write }
 

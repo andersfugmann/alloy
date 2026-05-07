@@ -168,6 +168,106 @@ let test_cooldown _switch () =
     let* () = Tcp_transport.close target_transport in
     Tcp_transport.close src_transport)
 
+(* -- Tests: Sub-client proxy *)
+
+(* Helper: read from subclient_read, skipping pushes (id=0), return first response *)
+let await_subclient_response stream =
+  let rec loop () =
+    let* raw = Lwt_stream.next stream in
+    match Protocol.deserialize_frame raw with
+    | Error _ -> loop ()
+    | Ok frame ->
+      match frame.Protocol.id with
+      | 0 -> loop ()
+      | _ -> Lwt.return (raw, frame)
+  in
+  loop ()
+
+let test_subclient_status _switch () =
+  let d = get_daemon () in
+  let* (_conn, _events, transport) = Test_harness.connect d ~name:"proxy-parent" () in
+  Lwt.finalize (fun () ->
+    let conn = _conn in
+    (* Verify the connection works with a normal call first *)
+    let* _result = Client.call conn Protocol.Status () in
+    (* Build a subclient frame: Status command with id=99, tenant="popup_001" *)
+    let frame = Protocol.make_request_frame Protocol.Status () 99 (Some "popup_001") in
+    let raw = Protocol.serialize_frame frame in
+    Client.subclient_write conn raw;
+    (* Read subclient_read — response should have original id and tenant restored *)
+    let* (_resp_raw, resp) = await_subclient_response (Client.subclient_read conn) in
+    Alcotest.(check int) "id restored" 99 resp.id;
+    Alcotest.(check (option string)) "tenant restored" (Some "popup_001") resp.tenant;
+    (* Verify payload is a success response with status info *)
+    (match Protocol.parse_response_payload resp with
+     | Ok (Protocol.Success _) -> ()
+     | Ok (Protocol.Failure msg) -> Alcotest.fail (Printf.sprintf "status failed: %s" msg)
+     | Error e -> Alcotest.fail (Printf.sprintf "parse response payload: %s" e));
+    Lwt.return_unit)
+  (fun () -> Tcp_transport.close transport)
+
+let test_subclient_id_rewriting _switch () =
+  let d = get_daemon () in
+  let* (_conn, _events, transport) = Test_harness.connect d ~name:"proxy-rewrite" () in
+  Lwt.finalize (fun () ->
+    let conn = _conn in
+    (* Verify connection works *)
+    let* _result = Client.call conn Protocol.Status () in
+    (* Send two subclient requests with the same id=1 but different tenants *)
+    let frame1 = Protocol.make_request_frame Protocol.Status () 1 (Some "popup_a") in
+    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 (Some "popup_b") in
+    Client.subclient_write conn (Protocol.serialize_frame frame1);
+    Client.subclient_write conn (Protocol.serialize_frame frame2);
+    (* Both should get responses with their original id=1 and correct tenant *)
+    let stream = Client.subclient_read conn in
+    let* (_raw1, resp1) = await_subclient_response stream in
+    let* (_raw2, resp2) = await_subclient_response stream in
+    Alcotest.(check int) "first: id" 1 resp1.id;
+    Alcotest.(check (option string)) "first: tenant" (Some "popup_a") resp1.tenant;
+    Alcotest.(check int) "second: id" 1 resp2.id;
+    Alcotest.(check (option string)) "second: tenant" (Some "popup_b") resp2.tenant;
+    Lwt.return_unit)
+  (fun () -> Tcp_transport.close transport)
+
+let test_subclient_push_broadcast _switch () =
+  let d = get_daemon () in
+  (* Parent client with subclient channel *)
+  let* (parent_conn, _parent_events, parent_transport) =
+    Test_harness.connect d ~tenant:"proxy-bcast" ~name:"proxy-bcast" () in
+  (* Another client that will trigger a push *)
+  let* (trigger_conn, _trigger_events, trigger_transport) =
+    Test_harness.connect d ~tenant:"test-tenant" ~name:"trigger" () in
+  Lwt.finalize (fun () ->
+    (* Source opens a URL matching a rule → target (test-tenant) gets Navigate push.
+       The parent_conn also receives the push on its subclient_read (it receives ALL pushes). *)
+    let* _result = Client.call trigger_conn Protocol.Get_config () in
+    (* Config_updated pushes are sent on registration — consume them first *)
+    let rec drain_pushes () =
+      match Lwt_stream.get_available (Client.subclient_read parent_conn) with
+      | [] -> ()
+      | _ -> drain_pushes ()
+    in
+    drain_pushes ();
+    (* Now trigger an action that sends a push to our parent client:
+       Register a third client that will cause Config_updated push to parent *)
+    let* (_extra_conn, _extra_events, extra_transport) =
+      Test_harness.connect d ~tenant:"extra" ~name:"extra" () in
+    (* Wait briefly for the push to propagate *)
+    let* () = Lwt_unix.sleep 0.1 in
+    (* subclient_read should have the raw Config_updated push *)
+    let available = Lwt_stream.get_available (Client.subclient_read parent_conn) in
+    Alcotest.(check bool) "got push on subclient_read" true (List.length available >= 1);
+    (* Verify it's a push frame (id=0) *)
+    let raw = List.hd_exn available in
+    (match Protocol.deserialize_frame raw with
+     | Error e -> Alcotest.fail (Printf.sprintf "parse push: %s" e)
+     | Ok frame ->
+       Alcotest.(check int) "push id is 0" 0 frame.id);
+    Tcp_transport.close extra_transport)
+  (fun () ->
+    let* () = Tcp_transport.close parent_transport in
+    Tcp_transport.close trigger_transport)
+
 (* -- Test runner *)
 
 let () =
@@ -190,6 +290,11 @@ let () =
           Alcotest_lwt.test_case "no redirect" `Quick test_no_redirect;
           Alcotest_lwt.test_case "self-open forced local" `Quick test_self_open;
           Alcotest_lwt.test_case "cooldown" `Slow test_cooldown;
+        ]);
+       ("subclient", [
+          Alcotest_lwt.test_case "relay status" `Quick test_subclient_status;
+          Alcotest_lwt.test_case "id rewriting" `Quick test_subclient_id_rewriting;
+          Alcotest_lwt.test_case "push broadcast" `Quick test_subclient_push_broadcast;
         ]);
      ]);
   Test_harness.stop d

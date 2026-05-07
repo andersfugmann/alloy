@@ -5,12 +5,14 @@ const {
 
 let mock;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   mock = createMock();
   global.chrome = mock.chrome;
   global.console.log = jest.fn();
   require("../main.bc.js");
+  // Allow Lwt microtasks to process (Client.init waits for Registered push)
+  await new Promise((resolve) => setTimeout(resolve, 10));
 });
 
 afterEach(() => {
@@ -22,15 +24,18 @@ describe("popup messages", () => {
     const { triggerPortDisconnect } = require("./chrome_mock");
     triggerPortDisconnect(mock.ports[0]);
 
-    // Allow Lwt microtask to process
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Allow Lwt microtask to process disconnect
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
+    // Send frame-format status command
     const response = await sendPopupMessage(mock.listeners, {
-      cmd: ["Status"],
+      id: 1,
+      payload: { command: "status", params: null },
     });
 
-    // Wire.response Err format
-    expect(response).toEqual(["Err", { message: "Not connected" }]);
+    // Wire.frame response with Failure
+    expect(response).toHaveProperty("id");
+    expect(response.payload).toEqual(["Failure", "Not connected"]);
   });
 
   test("unknown action returns error", async () => {
@@ -53,7 +58,7 @@ describe("popup messages", () => {
     const { triggerPortDisconnect } = require("./chrome_mock");
     triggerPortDisconnect(mock.ports[0]);
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     const response = await sendPopupMessage(mock.listeners, {
       action: "reconnect",
