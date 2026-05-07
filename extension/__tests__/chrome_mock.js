@@ -18,6 +18,15 @@ function createMock() {
     const disconnectListeners = [];
     const port = {
       postMessage: jest.fn((msg) => {
+        // Handle bridge handshake: respond to connect request
+        if (msg && msg.msg === "connect") {
+          setTimeout(() => {
+            msgListeners.forEach((cb) =>
+              cb({ msg: "connected", result: ["Connected", { status: "connected", hostname: "test-host" }] })
+            );
+          }, 0);
+          return;
+        }
         // Auto-respond with Registered push when Register frame is received
         if (msg && msg.id === 0 && msg.payload && msg.payload.command === "register") {
           setTimeout(() => {

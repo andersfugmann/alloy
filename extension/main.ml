@@ -104,18 +104,49 @@ let non_empty (s : string) : string option =
   | true -> None
   | false -> Some s
 
-let connect_with_settings (port : native_port) (tenant_name : string) (_daemon_host : string) (_daemon_port : string) ~(debug_logging : bool) : state =
+let connect_with_settings (port : native_port) (tenant_name : string) (daemon_host : string) (daemon_port : string) ~(debug_logging : bool) : state =
   let brand = non_empty (Chrome_api.Navigator.get_browser_brand ()) in
-  let name = non_empty tenant_name in
-  log (Printf.sprintf "Browser brand: %s, tenant: %s"
-    (Option.value brand ~default:"(none)")
-    (Option.value name ~default:"(default)"));
   let write msg = Chrome_api.Port.post_message_json port msg in
   let (read, push_incoming) = Lwt_stream.create () in
   Chrome_api.Port.on_message_json port (fun msg -> push_incoming (Some msg));
   Chrome_api.Port.on_disconnect port (fun () -> push Port_disconnected);
-  (* Client.init is async — sends register and waits for Registered push *)
+  (* Determine host/port for bridge handshake *)
+  let host =
+    match String.is_empty daemon_host with
+    | true -> Constants.default_host
+    | false -> daemon_host
+  in
+  let port_num =
+    match Int.of_string_opt daemon_port with
+    | Some p -> p
+    | None -> Constants.default_port
+  in
+  (* Send bridge handshake, then init client *)
   Lwt.async (fun () ->
+    let addr : Protocol.listen_address = { host; port = port_num } in
+    let req = Protocol.make_bridge_request addr in
+    write (Yojson.Safe.to_string (Protocol.bridge_request_to_yojson req));
+    (* Wait for bridge response *)
+    let* raw = Lwt_stream.next read in
+    let hostname =
+      match Yojson.Safe.from_string raw with
+      | json ->
+        begin match Protocol.parse_bridge_response json with
+        | Ok connected -> connected.hostname
+        | Error _ -> ""
+        end
+      | exception Yojson.Json_error _ -> ""
+    in
+    let name =
+      match non_empty tenant_name with
+      | Some n -> Some n
+      | None ->
+        match String.is_empty hostname with
+        | true -> None
+        | false -> Some hostname
+    in
+    log (Printf.sprintf "Bridge connected: hostname=%s, tenant=%s"
+      hostname (Option.value name ~default:"(default)"));
     let* (conn, bridge_events) = Client.init ~write ~read ?tenant:name ?name ?brand () in
     push (Connection_ready conn);
     let rec forward () =
