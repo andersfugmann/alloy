@@ -1,5 +1,5 @@
 (executable
  (name main)
- (public_name alloy)
+ (public_name alloy_open)
  (package alloy)
  (libraries protocol constants eio eio_main yojson base stdio unix cmdliner))
