@@ -65,7 +65,7 @@ describe("navigation interception", () => {
   test("handles NAVIGATE push by opening a tab", () => {
     const port = mock.ports[0];
     // Wire.frame push format: {id: 0, payload}
-    triggerPortMessage(port, { id: 0, tenant: null, payload: ["Navigate", { url: "https://pushed.example.com" }] });
+    triggerPortMessage(port, { id: 0, tenant: "", payload: ["Navigate", { url: "https://pushed.example.com" }] });
 
     expect(mock.chrome.tabs.create).toHaveBeenCalledWith({
       url: "https://pushed.example.com",
@@ -93,7 +93,7 @@ describe("response handling", () => {
     // The client assigned id=1 for the first command after init
     const sentMsg = port.postMessage.mock.calls[0][0];
     // Wire.frame response format: {id, payload: ["Success", <json>]}
-    triggerPortMessage(port, { id: sentMsg.id, tenant: null, payload: ["Success", ["Local"]] });
+    triggerPortMessage(port, { id: sentMsg.id, tenant: "", payload: ["Success", ["Local"]] });
 
     // Should not create a tab for local routing
     expect(mock.chrome.tabs.create).not.toHaveBeenCalled();

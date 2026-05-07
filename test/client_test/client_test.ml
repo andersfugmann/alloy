@@ -191,13 +191,13 @@ let test_subclient_status _switch () =
     (* Verify the connection works with a normal call first *)
     let* _result = Client.call conn Protocol.Status () in
     (* Build a subclient frame: Status command with id=99, tenant="popup_001" *)
-    let frame = Protocol.make_request_frame Protocol.Status () 99 (Some "popup_001") in
+    let frame = Protocol.make_request_frame Protocol.Status () 99 "popup_001" in
     let raw = Protocol.serialize_frame frame in
     Client.subclient_write conn raw;
     (* Read subclient_read — response should have original id and tenant restored *)
     let* (_resp_raw, resp) = await_subclient_response (Client.subclient_read conn) in
     Alcotest.(check int) "id restored" 99 resp.id;
-    Alcotest.(check (option string)) "tenant restored" (Some "popup_001") resp.tenant;
+    Alcotest.(check string) "tenant restored" "popup_001" resp.tenant;
     (* Verify payload is a success response with status info *)
     (match Protocol.parse_response_payload resp with
      | Ok (Protocol.Success _) -> ()
@@ -214,8 +214,8 @@ let test_subclient_id_rewriting _switch () =
     (* Verify connection works *)
     let* _result = Client.call conn Protocol.Status () in
     (* Send two subclient requests with the same id=1 but different tenants *)
-    let frame1 = Protocol.make_request_frame Protocol.Status () 1 (Some "popup_a") in
-    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 (Some "popup_b") in
+    let frame1 = Protocol.make_request_frame Protocol.Status () 1 "popup_a" in
+    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 "popup_b" in
     Client.subclient_write conn (Protocol.serialize_frame frame1);
     Client.subclient_write conn (Protocol.serialize_frame frame2);
     (* Both should get responses with their original id=1 and correct tenant *)
@@ -223,9 +223,9 @@ let test_subclient_id_rewriting _switch () =
     let* (_raw1, resp1) = await_subclient_response stream in
     let* (_raw2, resp2) = await_subclient_response stream in
     Alcotest.(check int) "first: id" 1 resp1.id;
-    Alcotest.(check (option string)) "first: tenant" (Some "popup_a") resp1.tenant;
+    Alcotest.(check string) "first: tenant" "popup_a" resp1.tenant;
     Alcotest.(check int) "second: id" 1 resp2.id;
-    Alcotest.(check (option string)) "second: tenant" (Some "popup_b") resp2.tenant;
+    Alcotest.(check string) "second: tenant" "popup_b" resp2.tenant;
     Lwt.return_unit)
   (fun () -> Tcp_transport.close transport)
 

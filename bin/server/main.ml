@@ -435,22 +435,22 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
 
 (* -- Response formatting *)
 
-let serialize_response id result =
-  Protocol.make_response_frame id result
+let serialize_response ~tenant id result =
+  Protocol.make_response_frame id ~tenant result
   |> Protocol.serialize_frame
 
 (* -- Generic executor: no GADT matching *)
 
-let execute_handler (Handler { cmd; handle }) request_json request_id env =
+let execute_handler (Handler { cmd; handle }) request_json request_id ~tenant env =
   match Protocol.request_deserializer cmd request_json with
   | Error msg ->
-    let response = serialize_response request_id (Error msg) in
+    let response = serialize_response ~tenant request_id (Error msg) in
     Eio.Stream.add env.connection.push_stream response;
     env.state
   | Ok request ->
     let respond result =
       let json_result = Result.map result ~f:(Protocol.response_serializer cmd) in
-      let response = serialize_response request_id json_result in
+      let response = serialize_response ~tenant request_id json_result in
       Eio.Stream.add env.connection.push_stream response
     in
     handle request env ~respond
@@ -462,7 +462,7 @@ let rec coordinator_loop state inbox ~sw ~clock =
   let state = match action with
     | Dispatch { handler; request_json; request_id; connection } ->
       let env = { state; tenant = sender; connection; sw; clock; inbox } in
-      execute_handler handler request_json request_id env
+      execute_handler handler request_json request_id ~tenant:sender env
     | Unregister ->
       let registry = Map.remove state.registry sender in
       log "tenant %s unregistered" sender;
@@ -503,12 +503,19 @@ let rec receive_requests ~tenant inbox connection reader =
       log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
       receive_requests ~tenant inbox connection reader
     | Ok (frame, rp) ->
-      let tenant_name = Option.value (Option.first_some frame.tenant tenant) ~default:"anonymous" in
+      let tenant_name =
+        match String.is_empty frame.tenant with
+        | false -> frame.tenant
+        | true ->
+          match tenant with
+          | Some t -> t
+          | None -> "anonymous"
+      in
       log "req[%s]: id=%d %s" tenant_name frame.id rp.command;
       match lookup_handler rp.command with
       | Error msg ->
         log "req[%s]: command error: %s" tenant_name msg;
-        let response = serialize_response frame.id (Error msg) in
+        let response = serialize_response ~tenant:tenant_name frame.id (Error msg) in
         Eio.Stream.add connection.push_stream response;
         receive_requests ~tenant inbox connection reader
       | Ok handler ->

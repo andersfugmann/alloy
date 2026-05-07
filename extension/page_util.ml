@@ -21,7 +21,7 @@ let send_message (msg : Yojson.Safe.t)
 let send_protocol_command : type req resp. (req, resp) Protocol.command -> req ->
     on_response:((resp, string) Result.t -> unit) -> unit =
   fun cmd params ~on_response ->
-    let frame = Protocol.make_request_frame cmd params 0 None in
+    let frame = Protocol.make_request_frame cmd params 0 "" in
     let msg = Protocol.frame_to_yojson frame in
     send_message msg ~on_response:(fun result ->
       match result with

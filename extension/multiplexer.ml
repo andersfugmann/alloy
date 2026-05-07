@@ -28,7 +28,11 @@ let deregister_port (mux : t) (tenant_id : string) : unit =
   mux.ports := Map.remove !(mux.ports) tenant_id
 
 let handle_register (mux : t) (frame : Protocol.frame) (port : Chrome_api.port) : string =
-  let desired = Option.value frame.tenant ~default:"anonymous" in
+  let desired =
+    match String.is_empty frame.tenant with
+    | true -> "anonymous"
+    | false -> frame.tenant
+  in
   let tenant_id = register_port mux desired port in
   let registered_frame = Protocol.make_push_frame (Registered { tenant_id }) in
   Chrome_api.Port.post_message_json port (Protocol.serialize_frame registered_frame);
@@ -70,11 +74,11 @@ let start (mux : t) (conn : Client.connection) : unit =
           Map.iter !(mux.ports) ~f:(fun port ->
             Chrome_api.Port.post_message_json port raw)
         | _ ->
-          begin match frame.tenant with
-          | Some tid ->
-            Option.iter (Map.find !(mux.ports) tid) ~f:(fun port ->
+          begin match String.is_empty frame.tenant with
+          | true -> ()
+          | false ->
+            Option.iter (Map.find !(mux.ports) frame.tenant) ~f:(fun port ->
               Chrome_api.Port.post_message_json port raw)
-          | None -> ()
           end
         end
       end;

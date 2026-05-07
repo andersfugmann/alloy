@@ -129,7 +129,7 @@ let json_of_yojson (x : Yojson.Safe.t) : (json, string) Result.t = Ok x
 
 type frame = {
   id : int;
-  tenant : string option; [@default None]
+  tenant : string; [@default ""]
   payload : json; [@default `Null]
 }
 [@@deriving yojson]
@@ -153,7 +153,63 @@ type push =
   | Config_updated of { config : config; registered_tenants : string list }
 [@@deriving yojson]
 
-(* -- Command serialization *)
+(* -- Bridge handshake (between extension and native messaging bridge) *)
+
+type bridge_request = {
+  msg : string;
+  address : listen_address; [@key "payload"]
+}
+[@@deriving yojson]
+
+type bridge_connected = {
+  status : string;
+  hostname : string;
+}
+[@@deriving yojson]
+
+type bridge_error = {
+  status : string;
+  error : string;
+}
+[@@deriving yojson]
+
+type bridge_response_payload =
+  | Connected of bridge_connected
+  | Bridge_error of bridge_error
+[@@deriving yojson]
+
+type bridge_response = {
+  msg : string;
+  result : bridge_response_payload;
+}
+[@@deriving yojson]
+
+let make_bridge_request (addr : listen_address) : bridge_request =
+  { msg = "connect"; address = addr }
+
+let make_bridge_connected (hostname : string) : bridge_response =
+  { msg = "connected"; result = Connected { status = "connected"; hostname } }
+
+let make_bridge_error (error : string) : bridge_response =
+  { msg = "connected"; result = Bridge_error { status = "error"; error } }
+
+let parse_bridge_request (json : Yojson.Safe.t) : (listen_address, string) Result.t =
+  match bridge_request_of_yojson json with
+  | Ok req ->
+    begin match String.equal req.msg "connect" with
+    | true -> Ok req.address
+    | false -> Error (Printf.sprintf "expected msg=connect, got %s" req.msg)
+    end
+  | Error e -> Error e
+
+let parse_bridge_response (json : Yojson.Safe.t) : (bridge_connected, string) Result.t =
+  match bridge_response_of_yojson json with
+  | Ok resp ->
+    begin match resp.result with
+    | Connected c -> Ok c
+    | Bridge_error e -> Error e.error
+    end
+  | Error e -> Error e
 
 let command_name : type req resp. (req, resp) command -> string = function
   | Register -> "register"
@@ -215,14 +271,14 @@ let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.
 
 (* -- Frame construction *)
 
-let make_request_frame : type req resp. (req, resp) command -> req -> int -> string option -> frame =
+let make_request_frame : type req resp. (req, resp) command -> req -> int -> string -> frame =
   fun cmd request id tenant ->
   { id; tenant; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
 
 let make_request_frame_raw ~command ~params ~id ~tenant =
   { id; tenant; payload = request_payload_to_yojson { command; params } }
 
-let make_response_frame id ?tenant result =
+let make_response_frame id ~tenant result =
   let rp =
     match result with
     | Ok json -> Success json
@@ -231,7 +287,7 @@ let make_response_frame id ?tenant result =
   { id; tenant; payload = response_payload_to_yojson rp }
 
 let make_push_frame push =
-  { id = 0; tenant = None; payload = push_to_yojson push }
+  { id = 0; tenant = ""; payload = push_to_yojson push }
 
 (* -- Frame serialization *)
 
@@ -256,7 +312,7 @@ let parse_push_payload frame =
 let%expect_test "request frame round-trip" =
   let test : type req resp. (req, resp) command -> req -> string -> unit =
     fun cmd params label ->
-      let frame = make_request_frame cmd params 42 (Some "test-tenant") in
+      let frame = make_request_frame cmd params 42 "test-tenant" in
       let json_str = serialize_frame frame in
       match deserialize_frame json_str with
       | Ok frame2 ->
@@ -290,7 +346,7 @@ let%expect_test "request frame round-trip" =
 
 let%expect_test "response frame round-trip" =
   let test label result =
-    let frame = make_response_frame 1 result in
+    let frame = make_response_frame 1 ~tenant:"test-tenant" result in
     let json_str = serialize_frame frame in
     match deserialize_frame json_str with
     | Ok frame2 ->

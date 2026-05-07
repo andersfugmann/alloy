@@ -181,7 +181,7 @@ let connect_to_daemon ~sw net ~host ~port =
 let send_command_cli ~net ~tenant ~host ~port (Cli_cmd { cmd; params; format }) =
   Eio.Switch.run @@ fun sw ->
   let flow = connect_to_daemon ~sw net ~host ~port in
-  let frame = Protocol.make_request_frame cmd params 1 (Some tenant) in
+  let frame = Protocol.make_request_frame cmd params 1 tenant in
   Eio.Flow.copy_string (Protocol.serialize_frame frame ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let response_line = Eio.Buf_read.line reader in
@@ -211,7 +211,7 @@ let run_register ~net ~host ~port ~tenant =
   let flow =
     connect_to_daemon ~sw net ~host ~port
   in
-  let frame = Protocol.make_request_frame Register { brand = None; address = None; name = None } 0 (Some tenant) in
+  let frame = Protocol.make_request_frame Register { brand = None; address = None; name = None } 0 tenant in
   Eio.Flow.copy_string (Protocol.serialize_frame frame ^ "\n") flow;
   let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
   let first_line = Eio.Buf_read.line reader in
@@ -284,7 +284,7 @@ let run_bridge env =
   let stdout_stream = Eio.Stream.create Constants.bridge_stream_capacity in
   (* Wait for a valid Register request; reject anything else *)
   let err_not_registered id =
-    Protocol.make_response_frame id (Error "Not connected. Send Register first")
+    Protocol.make_response_frame id ~tenant:"" (Error "Not connected. Send Register first")
     |> Protocol.serialize_frame
   in
   let rec await_register () =
@@ -317,7 +317,7 @@ let run_bridge env =
               address = None;
               name = Some tenant;
             } in
-            let patched_frame = Protocol.make_request_frame Register patched_request 0 (Some tenant) in
+            let patched_frame = Protocol.make_request_frame Register patched_request 0 tenant in
             Some (tenant, address, Protocol.serialize_frame patched_frame)
   in
   match await_register () with

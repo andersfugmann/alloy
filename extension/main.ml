@@ -293,7 +293,7 @@ let handle_popup_query (state : state) (json : Yojson.Safe.t)
   | Ok rp ->
     match state.connection with
     | None ->
-      respond (Protocol.frame_to_yojson (Protocol.make_response_frame 0 (Error "Not connected")));
+      respond (Protocol.frame_to_yojson (Protocol.make_response_frame 0 ~tenant:"" (Error "Not connected")));
       Lwt.return state
     | Some conn ->
       let* resp_frame = Client.send_raw_command conn ~command:rp.Protocol.command ~params:rp.params in

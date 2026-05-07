@@ -22,7 +22,7 @@ function createMock() {
         if (msg && msg.id === 0 && msg.payload && msg.payload.command === "register") {
           setTimeout(() => {
             msgListeners.forEach((cb) =>
-              cb({ id: 0, tenant: null, payload: ["Registered", { tenant_id: "test_tenant" }] })
+              cb({ id: 0, tenant: "", payload: ["Registered", { tenant_id: "test_tenant" }] })
             );
           }, 0);
         }

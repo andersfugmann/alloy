@@ -89,7 +89,7 @@ let dispatch_pending (state : loop_state) (id : int)
   | None ->
     match Map.find state.raw_pending id with
     | Some resolver ->
-      Lwt.wakeup_later resolver (Protocol.make_response_frame id result);
+      Lwt.wakeup_later resolver (Protocol.make_response_frame id ~tenant:"" result);
       { state with raw_pending = Map.remove state.raw_pending id }
     | None ->
       match Map.find state.subclient_pending id with
@@ -116,13 +116,13 @@ let handle_command (state : loop_state) (cmd : command)
   let id = state.next_id in
   match cmd with
   | Typed (Outgoing { cmd = c; request; resolver }) ->
-    let frame = Protocol.make_request_frame c request id None in
+    let frame = Protocol.make_request_frame c request id "" in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
       pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver }) }
   | Raw { command; params; resolver } ->
-    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant:None in
+    let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant:"" in
     write (Protocol.serialize_frame frame);
     { state with
       next_id = id + 1;
@@ -134,8 +134,8 @@ let handle_subclient_request (state : loop_state) (raw : string)
   | Error _msg -> state
   | Ok frame ->
     let id = state.next_id in
-    let sub_tenant = Option.value frame.tenant ~default:"unknown" in
-    let wire_frame = { Protocol.id; tenant = None; payload = frame.payload } in
+    let sub_tenant = frame.tenant in
+    let wire_frame = { Protocol.id; tenant = ""; payload = frame.payload } in
     write (Protocol.serialize_frame wire_frame);
     { state with
       next_id = id + 1;
@@ -176,7 +176,7 @@ let run_loop ~(command_stream : command Lwt_stream.t)
 let tenant_name (conn : connection) : string = conn.tenant_name
 
 let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
-    ?tenant ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
+    ?(tenant="") ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
   let (command_stream, push_command) = Lwt_stream.create () in
   let (event_stream, push_event) = Lwt_stream.create () in
   let (subclient_write_stream, push_subclient_write) = Lwt_stream.create () in
