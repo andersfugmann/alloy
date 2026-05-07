@@ -26,10 +26,16 @@ type command =
   | Typed of outgoing
   | Raw of { command : string; params : Yojson.Safe.t; resolver : Protocol.frame Lwt.u }
 
+type subclient_entry = {
+  original_id : int;
+  sub_tenant : string;
+}
+
 type loop_state = {
   next_id : int;
   pending : pending_entry Map.M(Int).t;
   raw_pending : Protocol.frame Lwt.u Map.M(Int).t;
+  subclient_pending : subclient_entry Map.M(Int).t;
 }
 
 (* -- Connection (opaque to caller) *)
@@ -37,6 +43,8 @@ type loop_state = {
 type connection = {
   push_command : command option -> unit;
   tenant_name : string;
+  subclient_write : string -> unit;
+  subclient_read : string Lwt_stream.t;
 }
 
 (* -- Message parsing *)
@@ -67,7 +75,8 @@ let parse_message (raw : string) : incoming_msg =
 (* -- Connection thread *)
 
 let dispatch_pending (state : loop_state) (id : int)
-    (result : (Yojson.Safe.t, string) Result.t) : loop_state =
+    (result : (Yojson.Safe.t, string) Result.t)
+    ~(push_subclient : string option -> unit) : loop_state =
   match Map.find state.pending id with
   | Some (Entry { cmd; resolver }) ->
     let typed_result =
@@ -82,17 +91,25 @@ let dispatch_pending (state : loop_state) (id : int)
     | Some resolver ->
       Lwt.wakeup_later resolver (Protocol.make_response_frame id result);
       { state with raw_pending = Map.remove state.raw_pending id }
-    | None -> state
+    | None ->
+      match Map.find state.subclient_pending id with
+      | Some { original_id; sub_tenant } ->
+        let frame = Protocol.make_response_frame original_id ~tenant:sub_tenant result in
+        push_subclient (Some (Protocol.serialize_frame frame));
+        { state with subclient_pending = Map.remove state.subclient_pending id }
+      | None -> state
 
 let handle_incoming (state : loop_state) (raw : string)
-    ~(push_event : event option -> unit) : loop_state =
+    ~(push_event : event option -> unit)
+    ~(push_subclient : string option -> unit) : loop_state =
   match parse_message raw with
   | Parse_error _msg -> state
   | Server_push p ->
     push_event (Some (Push p));
+    push_subclient (Some raw);
     state
   | Response { id; result } ->
-    dispatch_pending state id result
+    dispatch_pending state id result ~push_subclient
 
 let handle_command (state : loop_state) (cmd : command)
     ~(write : string -> unit) : loop_state =
@@ -101,35 +118,55 @@ let handle_command (state : loop_state) (cmd : command)
   | Typed (Outgoing { cmd = c; request; resolver }) ->
     let frame = Protocol.make_request_frame c request id None in
     write (Protocol.serialize_frame frame);
-    { next_id = id + 1;
-      pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver });
-      raw_pending = state.raw_pending }
+    { state with
+      next_id = id + 1;
+      pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver }) }
   | Raw { command; params; resolver } ->
     let frame = Protocol.make_request_frame_raw ~command ~params ~id ~tenant:None in
     write (Protocol.serialize_frame frame);
-    { next_id = id + 1;
-      pending = state.pending;
+    { state with
+      next_id = id + 1;
       raw_pending = Map.set state.raw_pending ~key:id ~data:resolver }
+
+let handle_subclient_request (state : loop_state) (raw : string)
+    ~(write : string -> unit) : loop_state =
+  match Protocol.deserialize_frame raw with
+  | Error _msg -> state
+  | Ok frame ->
+    let id = state.next_id in
+    let sub_tenant = Option.value frame.tenant ~default:"unknown" in
+    let wire_frame = { Protocol.id; tenant = None; payload = frame.payload } in
+    write (Protocol.serialize_frame wire_frame);
+    { state with
+      next_id = id + 1;
+      subclient_pending = Map.set state.subclient_pending ~key:id
+        ~data:{ original_id = frame.id; sub_tenant } }
 
 let run_loop ~(command_stream : command Lwt_stream.t)
     ~(read : string Lwt_stream.t)
+    ~(subclient_write_stream : string Lwt_stream.t)
     ~(push_event : event option -> unit)
+    ~(push_subclient : string option -> unit)
     ~(write : string -> unit) : unit Lwt.t =
   let initial_state = {
     next_id = 1;
     pending = Map.empty (module Int);
     raw_pending = Map.empty (module Int);
+    subclient_pending = Map.empty (module Int);
   } in
   let rec loop state =
     let* msg = Lwt.pick [
       (let* c = Lwt_stream.next command_stream in Lwt.return (`Command c));
       (let* raw = Lwt_stream.next read in Lwt.return (`Incoming raw));
+      (let* raw = Lwt_stream.next subclient_write_stream in Lwt.return (`Subclient raw));
     ] in
     match msg with
     | `Command cmd ->
       loop (handle_command state cmd ~write)
     | `Incoming raw ->
-      loop (handle_incoming state raw ~push_event)
+      loop (handle_incoming state raw ~push_event ~push_subclient)
+    | `Subclient raw ->
+      loop (handle_subclient_request state raw ~write)
   in
   loop initial_state
 
@@ -141,6 +178,9 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
     ?tenant ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
   let (command_stream, push_command) = Lwt_stream.create () in
   let (event_stream, push_event) = Lwt_stream.create () in
+  let (subclient_write_stream, push_subclient_write) = Lwt_stream.create () in
+  let (subclient_read, push_subclient) = Lwt_stream.create () in
+  let subclient_write raw = push_subclient_write (Some raw) in
   (* Send registration as id=0, fire-and-forget *)
   let register_req : Protocol.register_request = { brand; address = None; name } in
   let frame = Protocol.make_request_frame Register register_req 0 tenant in
@@ -158,11 +198,13 @@ let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
       await_registered ()
   in
   let* assigned_tenant = await_registered () in
-  let conn = { push_command; tenant_name = assigned_tenant } in
+  let conn = { push_command; tenant_name = assigned_tenant;
+               subclient_write; subclient_read } in
   (* Start connection thread *)
   Lwt.async (fun () ->
     Lwt.catch
-      (fun () -> run_loop ~command_stream ~read ~push_event ~write)
+      (fun () -> run_loop ~command_stream ~read ~subclient_write_stream
+                   ~push_event ~push_subclient ~write)
       (fun _exn ->
         push_event (Some Disconnected);
         Lwt.return_unit));
@@ -174,6 +216,12 @@ let call : type req resp. connection -> (req, resp) Protocol.command -> req ->
     let (promise, resolver) = Lwt.wait () in
     conn.push_command (Some (Typed (Outgoing { cmd; request; resolver })));
     promise
+
+let subclient_write (conn : connection) (raw : string) : unit =
+  conn.subclient_write raw
+
+let subclient_read (conn : connection) : string Lwt_stream.t =
+  conn.subclient_read
 
 let send_raw_command (conn : connection) ~(command : string)
     ~(params : Yojson.Safe.t) : Protocol.frame Lwt.t =
