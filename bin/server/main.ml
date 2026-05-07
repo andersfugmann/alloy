@@ -137,26 +137,39 @@ let migrate_rules_from_config config_path json =
     match Protocol.rules_of_yojson rules_json with
     | Ok rules ->
       log "found rules in config.json, migrating to rules.json";
-      save_rules config_path rules;
-      let stripped =
-        match json with
-        | `Assoc fields ->
-          `Assoc (List.filter fields ~f:(fun (k, _) -> not (String.equal k "rules")))
-        | other -> other
-      in
-      let content = Yojson.Safe.pretty_to_string stripped in
-      Out_channel.write_all config_path ~data:(content ^ "\n")
+      save_rules config_path rules
     | Error msg ->
       log "warning: could not parse rules from config: %s" msg
+
+let fill_config_defaults (config : Protocol.config) : Protocol.config =
+  let listen =
+    match config.listen with
+    | [] -> Constants.default_listen
+    | l -> l
+  in
+  let allowed_networks =
+    match config.allowed_networks with
+    | [] -> Constants.default_allowed_networks
+    | n -> n
+  in
+  { config with listen; allowed_networks }
 
 let load_config path =
   match Stdlib.Sys.file_exists path with
   | true ->
     let content = In_channel.read_all path in
     Result.bind (Protocol.parse_json_string content) ~f:(fun json ->
+      migrate_rules_from_config path json;
       match Protocol.config_of_yojson json with
       | Ok config ->
-        migrate_rules_from_config path json;
+        let config = fill_config_defaults config in
+        (* Save back with defaults filled in and rules stripped *)
+        (match
+           save_config_to_path path config
+         with
+         | () -> ()
+         | exception exn ->
+           log "warning: could not update config: %s" (Exn.to_string exn));
         Ok config
       | Error msg -> Error msg)
   | false ->

@@ -57,12 +57,12 @@ type listen_address = {
 [@@deriving yojson]
 
 type config = {
-  listen : listen_address list;
-  allowed_networks : Cidr.t list;
-  tenants : tenants;
+  listen : listen_address list; [@default []]
+  allowed_networks : Cidr.t list; [@default []]
+  tenants : tenants; [@default []]
   defaults : defaults;
 }
-[@@deriving yojson]
+[@@deriving yojson { strict = false }]
 
 type status_info = {
   registered_tenants : tenant_id list;
@@ -439,4 +439,41 @@ let%expect_test "deserialize: invalid json string" =
   [%expect {|
     error=invalid JSON: Line 1, bytes 0-15:
     Invalid token 'not valid json{'
+    |}]
+
+let%expect_test "config backward compat: old config with rules field" =
+  let old_config = {|{
+    "listen": [{"host": "127.0.0.1", "port": 7120}],
+    "allowed_networks": ["127.0.0.0/8"],
+    "tenants": {"work": {"label": "Work", "color": "#FF0000"}},
+    "defaults": {"unmatched": "local", "cooldown_seconds": 5, "browser_launch_timeout": 10},
+    "rules": [{"pattern": ".*example.*", "target": "work", "enabled": true}]
+  }|} in
+  let json = Yojson.Safe.from_string old_config in
+  begin match config_of_yojson json with
+  | Ok _config -> printf "config with rules: ok\n"
+  | Error msg -> printf "config with rules: FAIL %s\n" msg
+  end;
+  (* Verify rules can be extracted from the raw JSON *)
+  let rules_json = Yojson.Safe.Util.member "rules" json in
+  begin match rules_of_yojson rules_json with
+  | Ok rules -> printf "rules: ok (%d rules)\n" (List.length rules)
+  | Error msg -> printf "rules: FAIL %s\n" msg
+  end;
+  (* Old config without listen/allowed_networks *)
+  let minimal_config = {|{
+    "tenants": {"work": {"label": "Work", "color": "#FF0000"}},
+    "defaults": {"unmatched": "local", "cooldown_seconds": 5, "browser_launch_timeout": 10},
+    "rules": [{"pattern": ".*example.*", "target": "work", "enabled": true}]
+  }|} in
+  begin match config_of_yojson (Yojson.Safe.from_string minimal_config) with
+  | Ok config ->
+    printf "minimal config: ok (listen=%d, networks=%d)\n"
+      (List.length config.listen) (List.length config.allowed_networks)
+  | Error msg -> printf "minimal config: FAIL %s\n" msg
+  end;
+  [%expect {|
+    config with rules: ok
+    rules: ok (1 rules)
+    minimal config: ok (listen=0, networks=0)
     |}]
