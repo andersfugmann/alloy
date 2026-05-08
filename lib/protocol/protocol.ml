@@ -91,12 +91,31 @@ type register_request = {
 }
 [@@deriving yojson]
 
-type open_request = { url : string } [@@deriving yojson]
-type open_on_request = { target : string; url : string } [@@deriving yojson]
+type open_request = {
+  url : string;
+  title : string option; [@default None]
+} [@@deriving yojson]
+type open_on_request = {
+  target : string;
+  url : string;
+  title : string option; [@default None]
+} [@@deriving yojson]
 
 (* -- Response types *)
 
 type connection_info = { tenant_id : string } [@@deriving yojson]
+
+type history_entry = {
+  url : string;
+  title : string;
+  timestamp : float;
+} [@@deriving yojson]
+
+(* -- Lookup request *)
+
+type lookup_request = { query : string } [@@deriving yojson]
+
+type history = history_entry list [@@deriving yojson]
 
 (* -- GADT command type *)
 
@@ -111,6 +130,7 @@ type (_, _) command =
   | Set_rules : (rule list, unit) command
   | Status : (unit, status_info) command
   | Connection_info : (unit, connection_info) command
+  | Lookup : (lookup_request, history_entry list) command
 
 (* -- Helpers *)
 
@@ -227,6 +247,7 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Set_rules -> "set_rules"
   | Status -> "status"
   | Connection_info -> "connection_info"
+  | Lookup -> "lookup"
 
 let request_serializer : type req resp. (req, resp) command -> (req -> Yojson.Safe.t) = function
   | Register -> register_request_to_yojson
@@ -239,6 +260,7 @@ let request_serializer : type req resp. (req, resp) command -> (req -> Yojson.Sa
   | Set_rules -> rules_to_yojson
   | Status -> (fun () -> `Null)
   | Connection_info -> (fun () -> `Null)
+  | Lookup -> lookup_request_to_yojson
 
 let response_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (resp, string) Result.t) = function
   | Register ->
@@ -254,6 +276,7 @@ let response_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t
   | Set_rules -> (fun _ -> Ok ())
   | Status -> status_info_of_yojson
   | Connection_info -> connection_info_of_yojson
+  | Lookup -> history_of_yojson
 
 let request_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (req, string) Result.t) = function
   | Register -> register_request_of_yojson
@@ -266,6 +289,7 @@ let request_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t 
   | Set_rules -> rules_of_yojson
   | Status -> (fun _ -> Ok ())
   | Connection_info -> (fun _ -> Ok ())
+  | Lookup -> lookup_request_of_yojson
 
 let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
   | Register -> (fun s -> `String s)
@@ -278,8 +302,7 @@ let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.
   | Set_rules -> (fun () -> `Null)
   | Status -> status_info_to_yojson
   | Connection_info -> connection_info_to_yojson
-
-(* -- Frame construction *)
+  | Lookup -> history_to_yojson
 
 let make_request_frame : type req resp. (req, resp) command -> req -> int -> frame =
   fun cmd request id ->
@@ -336,14 +359,15 @@ let%expect_test "request frame round-trip" =
       | Error e -> printf "%s: FAIL frame: %s\n" label e
   in
   test Register { brand = Some "Chrome"; address = None; name = None } "register";
-  test Open { url = "https://x.com" } "open";
-  test Open_on { target = "work"; url = "https://x.com" } "open_on";
-  test Test { url = "https://test.com" } "test";
+  test Open { url = "https://x.com"; title = None } "open";
+  test Open_on { target = "work"; url = "https://x.com"; title = Some "Example" } "open_on";
+  test Test { url = "https://test.com"; title = None } "test";
   test Get_config () "get_config";
   test Get_rules () "get_rules";
   test Set_rules [] "set_rules";
   test Status () "status";
   test Connection_info () "connection_info";
+  test Lookup { query = "example" } "lookup";
   [%expect {|
     register: ok
     open: ok
@@ -354,6 +378,7 @@ let%expect_test "request frame round-trip" =
     set_rules: ok
     status: ok
     connection_info: ok
+    lookup: ok
     |}]
 
 let%expect_test "response frame round-trip" =
@@ -429,6 +454,7 @@ let%expect_test "response round-trip" =
   test Set_rules () "set_rules";
   test Status { registered_tenants = ["t1"]; uptime_seconds = 42 } "status";
   test Connection_info { tenant_id = "zaphod-chromium" } "connection_info";
+  test Lookup [{ url = "https://x.com"; title = "X"; timestamp = 1234567890.0 }] "lookup";
   [%expect {|
     register: ok
     open/local: ok
@@ -443,6 +469,7 @@ let%expect_test "response round-trip" =
     set_rules: ok
     status: ok
     connection_info: ok
+    lookup: ok
     |}]
 
 let%expect_test "deserialize: invalid json string" =

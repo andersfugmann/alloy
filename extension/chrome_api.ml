@@ -173,6 +173,13 @@ module Tabs = struct
       | false -> ())
     in
     call tabs "query" [| inject query; inject cb |]
+
+  let get_title tab_id ~on_result =
+    let cb = Js.wrap_callback (fun (tab : _ Js.t) ->
+      let title : Js.js_string Js.t Js.Optdef.t = Js.Unsafe.get tab (Js.string "title") in
+      on_result (Js.Optdef.case title (fun () -> None) (fun s -> Some (Js.to_string s))))
+    in
+    call tabs "get" [| inject tab_id; inject cb |]
 end
 
 (* ── Action (toolbar icon) ────────────────────────────────────────── *)

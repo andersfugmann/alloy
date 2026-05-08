@@ -34,7 +34,7 @@ let set_footer ?(cls = "") text =
 let send_page_to conn tenant =
   Page_util.query_active_tab ~on_result:(fun url tab_id ->
     Lwt.async (fun () ->
-      let* result = Client.call conn Open_on { target = tenant; url } in
+      let* result = Client.call conn Open_on { target = tenant; url; title = None } in
       begin match result with
       | Ok _ ->
         Chrome_api.Tabs.remove tab_id;

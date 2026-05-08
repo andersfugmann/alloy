@@ -28,6 +28,7 @@ module Tabs : sig
   val create_url : string -> unit
   val remove : int -> unit
   val query_active : on_result:(string -> int -> unit) -> unit
+  val get_title : int -> on_result:(string option -> unit) -> unit
 end
 
 module Action : sig

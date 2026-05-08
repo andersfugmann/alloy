@@ -94,7 +94,7 @@ let test_redirect _switch () =
     Test_harness.connect d ~name:"source" () in
   Lwt.finalize (fun () ->
     (* Source opens a URL matching the rule → should route to test-tenant *)
-    let* result = Client.call src_conn Protocol.Open { url = "http://www.example.com/page" } in
+    let* result = Client.call src_conn Protocol.Open { url = "http://www.example.com/page"; title = None } in
     (match result with
      | Ok (Protocol.Remote tenant) ->
        Alcotest.(check string) "routed to test-tenant" "test-tenant" tenant
@@ -117,7 +117,7 @@ let test_redirect _switch () =
 
 let test_no_redirect = with_client ~name:"no-redir" (fun conn _events ->
   (* URL doesn't match any rule → Local *)
-  let* result = Client.call conn Protocol.Open { url = "http://www.other.com/page" } in
+  let* result = Client.call conn Protocol.Open { url = "http://www.other.com/page"; title = None } in
   (match result with
    | Ok Protocol.Local -> ()
    | Ok (Protocol.Remote _) -> Alcotest.fail "expected Local, got Remote"
@@ -126,7 +126,7 @@ let test_no_redirect = with_client ~name:"no-redir" (fun conn _events ->
 
 let test_self_open = with_client ~name:"test-tenant" (fun conn _events ->
   (* Client registered as "test-tenant" opens URL targeting its own tenant → forced local *)
-  let* result = Client.call conn Protocol.Open { url = "http://www.example.com/self" } in
+  let* result = Client.call conn Protocol.Open { url = "http://www.example.com/self"; title = None } in
   (match result with
    | Ok Protocol.Local -> ()
    | Ok (Protocol.Remote _) -> Alcotest.fail "expected Local for self-open, got Remote"
@@ -144,13 +144,13 @@ let test_cooldown _switch () =
   Lwt.finalize (fun () ->
     let url = "http://www.example.com/cooldown-test" in
     (* First open → Remote (starts cooldown) *)
-    let* result = Client.call src_conn Protocol.Open { url } in
+    let* result = Client.call src_conn Protocol.Open { url; title = None } in
     (match result with
      | Ok (Protocol.Remote _) -> ()
      | Ok Protocol.Local -> Alcotest.fail "first open: expected Remote, got Local"
      | Error e -> Alcotest.fail (Printf.sprintf "first open failed: %s" e));
     (* Second open immediately → Local (cooldown active) *)
-    let* result = Client.call src_conn Protocol.Open { url } in
+    let* result = Client.call src_conn Protocol.Open { url; title = None } in
     (match result with
      | Ok Protocol.Local -> ()
      | Ok (Protocol.Remote _) -> Alcotest.fail "second open: expected Local (cooldown), got Remote"
@@ -158,7 +158,7 @@ let test_cooldown _switch () =
     (* Wait for cooldown to expire (1 second configured) *)
     let* () = Lwt_unix.sleep 1.1 in
     (* Third open → Remote again *)
-    let* result = Client.call src_conn Protocol.Open { url } in
+    let* result = Client.call src_conn Protocol.Open { url; title = None } in
     (match result with
      | Ok (Protocol.Remote _) -> ()
      | Ok Protocol.Local -> Alcotest.fail "third open: expected Remote after cooldown, got Local"

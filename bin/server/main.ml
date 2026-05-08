@@ -35,6 +35,8 @@ type state = {
   starting : (string * starting_tenant) list;
   cooldowns : cooldown_entry list;
   start_time : float;
+  history : Protocol.history_entry list;
+  history_path : string;
 }
 
 (* Try to push a message to a tenant connection.
@@ -113,6 +115,9 @@ let save_config_to_path config_path config =
 
 let rules_path_of config_path =
   Stdlib.Filename.dirname config_path ^ "/rules.json"
+
+let history_path_of config_path =
+  Stdlib.Filename.dirname config_path ^ "/history.json"
 
 let save_rules config_path rules =
   let path = rules_path_of config_path in
@@ -355,15 +360,23 @@ let handle_register params env ~respond:_ =
   |> fun s -> update_tenant_config s env.tenant params.brand
   |> broadcast_config
 
+let record_history state ~url ~title =
+  let title = Option.value title ~default:"" in
+  let timestamp = Unix.gettimeofday () in
+  let history = History.record state.history ~url ~title ~timestamp in
+  History.save state.history_path history;
+  { state with history }
+
 let handle_open (request : Protocol.open_request) env ~respond =
+  let state = record_history env.state ~url:request.url ~title:request.title in
   let url = request.url in
   let matched_target =
-    find_matching_rule env.state.compiled_rules url
-    |> Option.value_map ~default:env.state.config.defaults.unmatched ~f:fst
+    find_matching_rule state.compiled_rules url
+    |> Option.value_map ~default:state.config.defaults.unmatched ~f:fst
   in
   let now = Unix.gettimeofday () in
-  let (in_cooldown, pruned) = check_and_prune_cooldowns env.state.cooldowns ~now ~key:url in
-  let state = { env.state with cooldowns = pruned } in
+  let (in_cooldown, pruned) = check_and_prune_cooldowns state.cooldowns ~now ~key:url in
+  let state = { state with cooldowns = pruned } in
   let is_local =
     in_cooldown
     || String.equal matched_target env.tenant
@@ -384,7 +397,8 @@ let handle_open (request : Protocol.open_request) env ~respond =
     state
 
 let handle_open_on (request : Protocol.open_on_request) env ~respond =
-  let (state, promise) = deliver_url env.state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
+  let state = record_history env.state ~url:request.url ~title:request.title in
+  let (state, promise) = deliver_url state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
     respond result);
@@ -436,6 +450,11 @@ let handle_connection_info _request env ~respond =
   respond (Ok { Protocol.tenant_id = env.tenant });
   env.state
 
+let handle_lookup (request : Protocol.lookup_request) env ~respond =
+  let results = History.lookup env.state.history ~query:request.query in
+  respond (Ok results);
+  env.state
+
 (* -- Command lookup: single match on string → handler bundle *)
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
@@ -449,6 +468,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "set_rules" -> Ok (Handler { cmd = Set_rules; handle = handle_set_rules })
   | "status" -> Ok (Handler { cmd = Status; handle = handle_status })
   | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = handle_connection_info })
+  | "lookup" -> Ok (Handler { cmd = Lookup; handle = handle_lookup })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)
@@ -635,6 +655,8 @@ let run config_path =
     let clock = Eio.Stdenv.clock env in
     let net = Eio.Stdenv.net env in
     let (config, rules, compiled_rules) = load_and_validate_config config_path in
+    let history_path = history_path_of config_path in
+    let history = History.load history_path in
     let initial_state =
       {
         config;
@@ -645,6 +667,8 @@ let run config_path =
         starting = [];
         cooldowns = [];
         start_time = Unix.gettimeofday ();
+        history;
+        history_path;
       }
     in
     let inbox = Eio.Stream.create Constants.coordinator_inbox_capacity in

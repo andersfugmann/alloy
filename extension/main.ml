@@ -226,9 +226,13 @@ let handle_navigation state url tab_id =
   match is_connected state && not (is_internal_url url) with
   | false -> Lwt.return state
   | true ->
+    let (title_promise, title_resolver) = Lwt.wait () in
+    Chrome_api.Tabs.get_title tab_id ~on_result:(fun title ->
+      Lwt.wakeup_later title_resolver title);
+    let* title = title_promise in
     let t0 = Chrome_api.performance_now () in
     debug state (Printf.sprintf "→ Open %s" url);
-    let* result = call state Open { url } in
+    let* result = call state Open { url; title } in
     let elapsed = Chrome_api.performance_now () -. t0 in
     (match result with
      | Ok Protocol.Local ->
@@ -240,7 +244,7 @@ let handle_navigation state url tab_id =
     Lwt.return state
 
 let delete_matching_rule state url =
-  let* result = call state Test { url } in
+  let* result = call state Test { url; title = None } in
   match result with
   | Ok (Protocol.Match { rule_index; _ }) ->
     let* rules_result = call state Get_rules () in
@@ -264,13 +268,13 @@ let handle_context_menu state menu_id link_url page_url tab_id =
     (match String.is_empty link_url with
      | true -> Lwt.return state
      | false ->
-       let* _result = call state Open_on { target; url = link_url } in
+       let* _result = call state Open_on { target; url = link_url; title = None } in
        Lwt.return state)
   | Some ("send_to", target) ->
     (match String.is_empty page_url with
      | true -> Lwt.return state
      | false ->
-       let* result = call state Open_on { target; url = page_url } in
+       let* result = call state Open_on { target; url = page_url; title = None } in
        (match result with
         | Ok _ -> Option.iter tab_id ~f:Chrome_api.Tabs.remove
         | Error _ -> ());
