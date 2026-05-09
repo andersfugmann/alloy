@@ -13,15 +13,7 @@ type rule = {
 }
 [@@deriving yojson]
 
-let rules_to_yojson rules =
-  `List (List.map rules ~f:rule_to_yojson)
-
-let rules_of_yojson = function
-  | `List items ->
-    items
-    |> List.map ~f:rule_of_yojson
-    |> Result.all
-  | _ -> Error "rules: expected JSON array"
+type rules = rule list [@@deriving yojson]
 
 type tenant_config = {
   browser_cmd : string option; [@default None]
@@ -86,7 +78,7 @@ type test_result =
 
 type register_request = {
   brand : string option; [@default None]
-  address : string option; [@default None]
+  address : string option; [@default None] (* TODO: Remove this *)
   name : string option; [@default None]
 }
 [@@deriving yojson]
@@ -95,6 +87,7 @@ type open_request = {
   url : string;
   title : string option; [@default None]
 } [@@deriving yojson]
+
 type open_on_request = {
   target : string;
   url : string;
@@ -136,19 +129,19 @@ type (_, _) command =
 
 let ( let* ) r f = Result.bind r ~f
 
-let parse_json_string (s : string) : (Yojson.Safe.t, string) Result.t =
+let parse_json_string s =
   match Yojson.Safe.from_string s with
   | json -> Result.return json
   | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
-let json_to_string (json : Yojson.Safe.t) : string =
+let json_to_string json =
   Yojson.Safe.to_string json
 
 (* -- JSON identity for embedding raw JSON in wire envelopes *)
-
+(* TODO: Just use deriving on this *)
 type json = Yojson.Safe.t
-let json_to_yojson (x : json) : Yojson.Safe.t = x
-let json_of_yojson (x : Yojson.Safe.t) : (json, string) Result.t = Ok x
+let json_to_yojson x = x
+let json_of_yojson x = Ok x
 
 (* -- Unified wire frame *)
 
@@ -170,14 +163,16 @@ type response_payload =
 [@@deriving yojson]
 
 (* -- Push messages *)
-
+(* TODO: Avoid single field records *)
+(* TODO: Registered should not be part of push message. Its a special message that is not a push message (unsolicited). *)
 type push =
   | Navigate of { url : string }
-  | Registered of { tenant_id : string }
+  | Registered of { tenant_id : string } (* TODO: Rename to tenant *)
   | Config_updated of { config : config; registered_tenants : string list }
 [@@deriving yojson]
 
 (* -- Bridge handshake (between extension and native messaging bridge) *)
+(* TODO. Bridge protocol does not belong here *)
 
 type bridge_request = {
   msg : string;
@@ -209,16 +204,16 @@ type bridge_response = {
 }
 [@@deriving yojson]
 
-let make_bridge_request ~debug (addr : listen_address) : bridge_request =
+let make_bridge_request ~debug addr =
   { msg = "connect"; address = addr; debug }
 
-let make_bridge_connected (hostname : string) : bridge_response =
+let make_bridge_connected_ hostname =
   { msg = "connected"; result = Connected { status = "connected"; hostname } }
 
-let make_bridge_error (error : string) : bridge_response =
+let make_bridge_error error =
   { msg = "connected"; result = Bridge_error { status = "error"; error } }
 
-let parse_bridge_request (json : Yojson.Safe.t) : (listen_address * bool, string) Result.t =
+let parse_bridge_request json =
   match bridge_request_of_yojson json with
   | Ok req ->
     begin match String.equal req.msg "connect" with
@@ -227,7 +222,7 @@ let parse_bridge_request (json : Yojson.Safe.t) : (listen_address * bool, string
     end
   | Error e -> Error e
 
-let parse_bridge_response (json : Yojson.Safe.t) : (bridge_connected, string) Result.t =
+let parse_bridge_response json =
   match bridge_response_of_yojson json with
   | Ok resp ->
     begin match resp.result with
@@ -319,6 +314,7 @@ let make_response_frame id result =
   in
   { id; payload = response_payload_to_yojson rp }
 
+(* TODO. Rename to make_frame: int -> Yojson.Basic.t *)
 let make_push_frame push =
   { id = 0; payload = push_to_yojson push }
 

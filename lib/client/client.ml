@@ -1,230 +1,162 @@
 open! Base
 open! Stdio
+open! Lwt.Syntax
 
-let ( let* ) = Lwt.bind
+type message =
+  | Close
+  | Packet of Protocol.frame
+  | Request of Protocol.json * (Protocol.json option -> unit)
+  | Register of (Protocol.push option -> unit)
 
-(* -- Events exposed to the caller *)
-
-type event =
-  | Push of Protocol.push
-  | Disconnected
-
-(* -- Internal types *)
-
-type pending_entry = Entry : {
-  cmd : ('req, 'resp) Protocol.command;
-  resolver : ('resp, string) Result.t Lwt.u;
-} -> pending_entry
-
-type outgoing = Outgoing : {
-  cmd : ('req, 'resp) Protocol.command;
-  request : 'req;
-  resolver : ('resp, string) Result.t Lwt.u;
-} -> outgoing
-
-type command =
-  | Typed of outgoing
-  | Raw of { command : string; params : Yojson.Safe.t; resolver : Protocol.frame Lwt.u }
-
-type subclient_entry = {
-  original_id : int;
+type state = {
+  tenant: string;
+  next_id: int;
+  pending: (int * (Protocol.json option -> unit)) list;
+  listeners: (Protocol.push option -> unit) list;
 }
 
-type loop_state = {
-  next_id : int;
-  pending : pending_entry Map.M(Int).t;
-  raw_pending : Protocol.frame Lwt.u Map.M(Int).t;
-  subclient_pending : subclient_entry Map.M(Int).t;
-}
+type t = { push: (message option -> unit); tenant: string; }
 
-(* -- Connection (opaque to caller) *)
+let is_registration_request payload =
+  let cmd = Protocol.command_name Register in
+  match Protocol.request_payload_of_yojson payload with
+  | Ok { Protocol.command; _} -> String.equal command cmd
+  | Error _ -> false
 
-type connection = {
-  push_command : command option -> unit;
-  tenant_name : string;
-  subclient_write : string -> unit;
-  subclient_read : string Lwt_stream.t;
-}
+let close_clients state =
+    List.iter ~f:(fun listener -> listener None) state.listeners;
+    List.iter ~f:(fun (_, receiver) -> receiver None) state.pending;
+    { state with pending = []; listeners = [] }
 
-(* -- Message parsing *)
-
-type incoming_msg =
-  | Server_push of Protocol.push
-  | Response of { id : int; result : (Yojson.Safe.t, string) Result.t }
-  | Parse_error of string
-
-let parse_frame_payload (frame : Protocol.frame) : incoming_msg =
-  match frame.id with
-  | 0 ->
-    begin match Protocol.parse_push_payload frame with
-    | Ok push -> Server_push push
-    | Error msg -> Parse_error (Printf.sprintf "invalid push: %s" msg)
-    end
-  | _ ->
-    match Protocol.parse_response_payload frame with
-    | Ok (Protocol.Success json) -> Response { id = frame.id; result = Ok json }
-    | Ok (Protocol.Failure msg) -> Response { id = frame.id; result = Error msg }
-    | Error msg -> Parse_error (Printf.sprintf "invalid response: %s" msg)
-
-let parse_message (raw : string) : incoming_msg =
-  match Protocol.deserialize_frame raw with
-  | Error msg -> Parse_error (Printf.sprintf "invalid frame: %s" msg)
-  | Ok frame -> parse_frame_payload frame
-
-(* -- Connection thread *)
-
-let dispatch_pending (state : loop_state) (id : int)
-    (result : (Yojson.Safe.t, string) Result.t)
-    ~(push_subclient : string option -> unit) : loop_state =
-  match Map.find state.pending id with
-  | Some (Entry { cmd; resolver }) ->
-    let typed_result =
-      match result with
-      | Ok json -> Protocol.response_deserializer cmd json
-      | Error msg -> Error msg
+let handle_message ~send_f state = function
+  | Close ->
+    close_clients state
+  | Packet { id=0; payload } ->
+    let push_msg = match Protocol.push_of_yojson payload with
+      | Ok push -> Some push
+      | Error _s ->
+        let _ = close_clients state in
+        failwith "Could not decode push payload"
     in
-    Lwt.wakeup_later resolver typed_result;
-    { state with pending = Map.remove state.pending id }
-  | None ->
-    match Map.find state.raw_pending id with
-    | Some resolver ->
-      Lwt.wakeup_later resolver (Protocol.make_response_frame id result);
-      { state with raw_pending = Map.remove state.raw_pending id }
-    | None ->
-      match Map.find state.subclient_pending id with
-      | Some { original_id } ->
-        let frame = Protocol.make_response_frame original_id result in
-        push_subclient (Some (Protocol.serialize_frame frame));
-        { state with subclient_pending = Map.remove state.subclient_pending id }
-      | None -> state
-
-let handle_incoming (state : loop_state) (raw : string)
-    ~(push_event : event option -> unit)
-    ~(push_subclient : string option -> unit) : loop_state =
-  match parse_message raw with
-  | Parse_error _msg -> state
-  | Server_push p ->
-    push_event (Some (Push p));
-    push_subclient (Some raw);
+    (* Send packets to all listeners. Any listener that errors should be removed *)
+    let listeners =
+      List.fold ~init:[] ~f:(fun acc handler ->
+          match handler push_msg with
+          | () -> handler :: acc
+          | exception _ -> acc
+        ) state.listeners
+    in
+    { state with listeners }
+  | Packet { id; payload } ->
+    let pending = match List.Assoc.find state.pending ~equal:Int.equal id with
+      | None -> state.pending
+      | Some handler ->
+        handler (Some payload);
+        List.Assoc.remove state.pending ~equal:Int.equal id
+    in
+    { state with pending }
+  | Request (req, rep_handler) when is_registration_request req ->
+    let reply =
+      Protocol.(Registered { tenant_id = state.tenant })
+      |> Protocol.push_to_yojson
+    in
+    rep_handler (Some reply);
     state
-  | Response { id; result } ->
-    dispatch_pending state id result ~push_subclient
 
-let handle_command (state : loop_state) (cmd : command)
-    ~(write : string -> unit) : loop_state =
-  let id = state.next_id in
-  match cmd with
-  | Typed (Outgoing { cmd = c; request; resolver }) ->
-    let frame = Protocol.make_request_frame c request id in
-    write (Protocol.serialize_frame frame);
-    { state with
-      next_id = id + 1;
-      pending = Map.set state.pending ~key:id ~data:(Entry { cmd = c; resolver }) }
-  | Raw { command; params; resolver } ->
-    let frame = Protocol.make_request_frame_raw ~command ~params ~id in
-    write (Protocol.serialize_frame frame);
-    { state with
-      next_id = id + 1;
-      raw_pending = Map.set state.raw_pending ~key:id ~data:resolver }
+  | Request (req, rep_handler) ->
+    send_f Protocol.{ id = state.next_id; payload = req };
+    let pending = (state.next_id, rep_handler) :: state.pending in
+    { state with next_id = state.next_id + 1; pending }
 
-let handle_subclient_request (state : loop_state) (raw : string)
-    ~(write : string -> unit) : loop_state =
-  match Protocol.deserialize_frame raw with
-  | Error _msg -> state
-  | Ok frame ->
-    let id = state.next_id in
-    let wire_frame = { Protocol.id; payload = frame.payload } in
-    write (Protocol.serialize_frame wire_frame);
-    { state with
-      next_id = id + 1;
-      subclient_pending = Map.set state.subclient_pending ~key:id
-        ~data:{ original_id = frame.id } }
+  | Register listener ->
+    { state with listeners = listener :: state.listeners }
 
-let run_loop ~(command_stream : command Lwt_stream.t)
-    ~(read : string Lwt_stream.t)
-    ~(subclient_write_stream : string Lwt_stream.t)
-    ~(push_event : event option -> unit)
-    ~(push_subclient : string option -> unit)
-    ~(write : string -> unit) : unit Lwt.t =
-  let initial_state = {
-    next_id = 1;
-    pending = Map.empty (module Int);
-    raw_pending = Map.empty (module Int);
-    subclient_pending = Map.empty (module Int);
-  } in
-  let merged = Lwt_stream.choose [
-    Lwt_stream.map (fun c -> `Command c) command_stream;
-    Lwt_stream.map (fun r -> `Incoming r) read;
-    Lwt_stream.map (fun s -> `Subclient s) subclient_write_stream;
-  ] in
-  let rec loop state =
-    let* msg = Lwt_stream.next merged in
-    match msg with
-    | `Command cmd ->
-      loop (handle_command state cmd ~write)
-    | `Incoming raw ->
-      loop (handle_incoming state raw ~push_event ~push_subclient)
-    | `Subclient raw ->
-      loop (handle_subclient_request state raw ~write)
-  in
-  loop initial_state
+let close t =
+  t.push (Some Close);
+  t.push None
 
-(* -- Public API *)
-
-let tenant_name (conn : connection) : string = conn.tenant_name
-
-let init ~(write : string -> unit) ~(read : string Lwt_stream.t)
-    ?name ?brand () : (connection * event Lwt_stream.t) Lwt.t =
-  let (command_stream, push_command) = Lwt_stream.create () in
-  let (event_stream, push_event) = Lwt_stream.create () in
-  let (subclient_write_stream, push_subclient_write) = Lwt_stream.create () in
-  let (subclient_read, push_subclient) = Lwt_stream.create () in
-  let subclient_write raw = push_subclient_write (Some raw) in
-  (* Send registration as id=0, fire-and-forget *)
-  let register_req : Protocol.register_request = { brand; address = None; name } in
+let init ~recv_s ~send_f ?name ?brand () =
+  (* Create a stream for receiving events *)
+  let stream, push = Lwt_stream.create () in
+  let register_req = Protocol.{ brand; address = None; name } in
   let frame = Protocol.make_request_frame Register register_req 0 in
-  write (Protocol.serialize_frame frame);
-  (* Wait for Registered push to learn assigned tenant name *)
-  let rec await_registered () =
-    let* raw = Lwt_stream.next read in
-    match parse_message raw with
-    | Server_push (Registered { tenant_id }) ->
-      Lwt.return tenant_id
-    | Server_push p ->
-      push_event (Some (Push p));
-      await_registered ()
-    | Response _ | Parse_error _ ->
-      await_registered ()
+  send_f frame;
+  (* Wait for registered reply *)
+  let* frame = Lwt_stream.next recv_s in
+  let tenant =
+    match Protocol.parse_push_payload frame with
+    | Ok (Registered { tenant_id }) ->
+      tenant_id
+    | _ ->
+      failwith "Unexpected packet received while waiting for registration reply"
   in
-  let* assigned_tenant = await_registered () in
-  let conn = { push_command; tenant_name = assigned_tenant;
-               subclient_write; subclient_read } in
-  (* Start connection thread *)
-  Lwt.async (fun () ->
-    Lwt.catch
-      (fun () -> run_loop ~command_stream ~read
-                   ~subclient_write_stream
-                   ~push_event ~push_subclient ~write)
-      (fun _exn ->
-        push_event (Some Disconnected);
-        Lwt.return_unit));
-  Lwt.return (conn, event_stream)
+  let t = { push; tenant; } in
+  (* Register for broadcasts *)
+  let broadcast_stream, broadcast_push = Lwt_stream.create () in
+  push (Some (Register broadcast_push));
+  Lwt.dont_wait (fun () ->
+      let* () = Lwt_stream.iter (fun frame -> push (Some (Packet frame))) recv_s in
+      Lwt.return (close t)
+    ) raise;
+  Lwt.dont_wait (fun () ->
+      Lwt_stream.fold
+        (fun msg state -> handle_message ~send_f state msg)
+        stream
+        { next_id = 1; pending = []; listeners = []; tenant }
+      |> Lwt.map (fun _ -> ())
+    ) raise;
+  (* And return what we promised *)
+  Lwt.return (t, broadcast_stream)
 
-let call : type req resp. connection -> (req, resp) Protocol.command -> req ->
-    (resp, string) Result.t Lwt.t =
-  fun conn cmd request ->
-    let (promise, resolver) = Lwt.wait () in
-    conn.push_command (Some (Typed (Outgoing { cmd; request; resolver })));
-    promise
+(* Send messages though the client from another client *)
+(* This takes request payload and return a response payload *)
+let proxy t payload handler =
+  t.push (Some (Request (payload, handler)))
 
-let subclient_write (conn : connection) (raw : string) : unit =
-  conn.subclient_write raw
-
-let subclient_read (conn : connection) : string Lwt_stream.t =
-  conn.subclient_read
-
-let send_raw_command (conn : connection) ~(command : string)
-    ~(params : Yojson.Safe.t) : Protocol.frame Lwt.t =
+let call : type req resp. t -> (req, resp) Protocol.command -> req ->
+  (resp, string) Result.t Lwt.t = fun client cmd request ->
   let (promise, resolver) = Lwt.wait () in
-  conn.push_command (Some (Raw { command; params; resolver }));
+  let request = Protocol.request_serializer cmd request in
+  let response_handler json =
+    let response =
+      let (let*) a f = Result.bind ~f a in
+      let* json = Result.of_option json ~error:"Closed" in
+      let* payload = Protocol.response_payload_of_yojson json in
+      let* payload = match payload with
+        | Success json -> Result.return json
+        | Failure s -> Result.fail s
+      in
+      Protocol.response_deserializer cmd payload
+    in
+    Lwt.wakeup resolver response
+  in
+  proxy client request response_handler;
   promise
+
+
+let register_broadcast t callback =
+  t.push (Some (Register callback))
+
+let name t = t.tenant
+
+(** Helper functions to connect a client to a client *)
+let make_proxy_client t =
+  let recv_s, push = Lwt_stream.create () in
+  let handle_broadcast msg =
+    let frame = Option.map msg ~f:Protocol.make_push_frame in
+    push frame
+  in
+  register_broadcast t handle_broadcast;
+  (* Sending requests though another client will require us to match frame id's *)
+  (* send and recv has frame ids. *)
+
+  let send_f frame =
+    let handler payload =
+      let frame = Option.map ~f:(fun payload -> Protocol.{ id = frame.id; payload }) payload in
+      push frame
+    in
+    proxy t frame.payload handler
+  in
+  init ~recv_s ~send_f ()
+
+(* TODO. Create test cases for the proxy. Need longer daisy chain, and verify that broadcast work Tests should not be in this file *)
