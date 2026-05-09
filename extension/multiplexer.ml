@@ -34,8 +34,8 @@ let handle_response_payload port close_var correlation_id payload =
     match payload with
     | Some payload -> payload
     | None ->
-      close close_var; (* The var will not be closed untill this function ends. There are not scheduling points, its not a problem*)
-      Protocol.Failure "Closed" |> Protocol.response_payload_to_yojson
+      close close_var;
+      Protocol.response_payload_to_yojson (Error "Closed")
   in
   Protocol.{ correlation_id; payload }
   |> Protocol.frame_to_yojson

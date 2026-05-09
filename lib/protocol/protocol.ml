@@ -150,17 +150,16 @@ type request_payload = {
 [@@deriving yojson]
 
 
-(* TODO: This should just be a Result. To serialize, overload result:
-   type ('a, string) response_payload : ('a, string) Result.t
-     | Ok of 'a
-     | Error of string [@@deriving yojson]
+type response_payload = (json, string) Result.t
 
-   To keep a result type, and not invent our own.
-*)
-type response_payload =
-  | Success of json
-  | Failure of string
-[@@deriving yojson]
+let response_payload_to_yojson : response_payload -> Yojson.Safe.t = function
+  | Ok json -> `List [`String "Ok"; json]
+  | Error msg -> `List [`String "Error"; `String msg]
+
+let response_payload_of_yojson : Yojson.Safe.t -> (response_payload, string) Result.t = function
+  | `List [`String "Ok"; json] -> Ok (Ok json)
+  | `List [`String "Error"; `String msg] -> Ok (Error msg)
+  | _ -> Error "response_payload: expected [\"Ok\", ...] or [\"Error\", ...]"
 
 (* TODO: Registered should not be part of push message. Its a special message that is not a push message (unsolicited). *)
 type push =
@@ -244,12 +243,7 @@ let make_request_frame : type req resp. (req, resp) command -> req -> int -> fra
   { correlation_id; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
 
 let make_response_frame correlation_id result =
-  let rp =
-    match result with
-    | Ok json -> Success json
-    | Error msg -> Failure msg
-  in
-  { correlation_id; payload = response_payload_to_yojson rp }
+  { correlation_id; payload = response_payload_to_yojson result }
 
 let make_push_frame push =
   { correlation_id = 0; payload = push_to_yojson push }
@@ -312,8 +306,8 @@ let%expect_test "response frame round-trip" =
     match deserialize_frame json_str with
     | Ok frame2 ->
       begin match response_payload_of_yojson frame2.payload with
-      | Ok (Success _) -> printf "%s: success\n" label
-      | Ok (Failure msg) -> printf "%s: failure: %s\n" label msg
+      | Ok (Ok _) -> printf "%s: success\n" label
+      | Ok (Error msg) -> printf "%s: failure: %s\n" label msg
       | Error e -> printf "%s: FAIL: %s\n" label e
       end
     | Error e -> printf "%s: FAIL: %s\n" label e

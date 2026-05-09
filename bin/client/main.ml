@@ -57,8 +57,8 @@ let run ~url ~host ~port =
     let* frame = Protocol.deserialize_frame response_line in
     let* rp = Protocol.response_payload_of_yojson frame.Protocol.payload in
     match rp with
-    | Protocol.Success json -> Protocol.response_deserializer Open json
-    | Protocol.Failure msg -> Error msg
+    | Ok json -> Protocol.response_deserializer Open json
+    | Error msg -> Error msg
   in
   match result with
   | Ok Protocol.Local -> print_endline "Local"

@@ -135,10 +135,7 @@ let call : type req resp. t -> (req, resp) Protocol.command -> req ->
       let (let*) a f = Result.bind ~f a in
       let* json = Result.of_option json ~error:"Closed" in
       let* payload = Protocol.response_payload_of_yojson json in
-      let* payload = match payload with
-        | Success json -> Result.return json
-        | Failure s -> Result.fail s
-      in
+      let* payload = payload in
       Protocol.response_deserializer cmd payload
     in
     Lwt.wakeup resolver response
