@@ -35,7 +35,7 @@ describe("navigation interception", () => {
     expect(msg).toHaveProperty("payload");
     const payload = msg.payload;
     expect(payload).toHaveProperty("command", "open");
-    expect(payload.params).toEqual({ url: "https://example.com" });
+    expect(payload.params).toEqual({ url: "https://example.com", title: "Example" });
   });
 
   test("ignores sub-frame navigations", () => {
@@ -75,7 +75,11 @@ describe("navigation interception", () => {
   test("does not send commands when disconnected", async () => {
     const port = mock.ports[0];
     triggerPortDisconnect(port);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Multiple microtask ticks needed for the Lwt promise chain:
+    // stream close → Client.close → Client.closed → handle_disconnect
+    for (let i = 0; i < 5; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     port.postMessage.mockClear();
     triggerNavigation(mock.listeners, "https://example.com", 1, 0);

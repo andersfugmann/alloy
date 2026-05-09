@@ -68,6 +68,7 @@ function createMock() {
     tabs: {
       create: jest.fn(),
       remove: jest.fn(),
+      get: jest.fn((tabId, cb) => cb({ id: tabId, url: "https://example.com", title: "Example" })),
       query: jest.fn((_query, cb) => cb([{ url: "https://example.com", id: 1 }])),
     },
     storage: {
@@ -118,13 +119,20 @@ function triggerPortDisconnect(port) {
   port._disconnectListeners.forEach((cb) => cb());
 }
 
-// Send a popup message and capture the response
-function sendPopupMessage(listeners, message) {
-  return new Promise((resolve) => {
-    listeners.onMessage.forEach((cb) => {
-      cb(message, {}, resolve);
-    });
-  });
+// Create a sub-port and trigger onConnect so the multiplexer registers it.
+// Returns the port object for further interaction.
+function connectSubPort(listeners) {
+  const msgListeners = [];
+  const disconnectListeners = [];
+  const port = {
+    postMessage: jest.fn(),
+    onMessage: { addListener: jest.fn((cb) => msgListeners.push(cb)) },
+    onDisconnect: { addListener: jest.fn((cb) => disconnectListeners.push(cb)) },
+    _msgListeners: msgListeners,
+    _disconnectListeners: disconnectListeners,
+  };
+  listeners.onConnect.forEach((cb) => cb(port));
+  return port;
 }
 
 module.exports = {
@@ -132,5 +140,5 @@ module.exports = {
   triggerNavigation,
   triggerPortMessage,
   triggerPortDisconnect,
-  sendPopupMessage,
+  connectSubPort,
 };

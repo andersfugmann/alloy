@@ -73,8 +73,8 @@ let handle_message ~send_f state = function
 
 let is_closed t =
   match Lwt.state t.closed with
-  | Lwt.Return () -> false
-  | _ -> true
+  | Lwt.Return () -> true
+  | _ -> false
 
 let close t =
   match is_closed t with
