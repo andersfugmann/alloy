@@ -169,66 +169,6 @@ type push =
   | Config_updated of { config : config; registered_tenants : string list }
 [@@deriving yojson]
 
-(* -- Bridge handshake (between extension and native messaging bridge) *)
-(* TODO. Bridge protocol does not belong here *)
-
-type bridge_request = {
-  msg : string;
-  address : listen_address; [@key "payload"]
-  debug : bool;
-}
-[@@deriving yojson]
-
-type bridge_connected = {
-  status : string;
-  hostname : string;
-}
-[@@deriving yojson]
-
-type bridge_error = {
-  status : string;
-  error : string;
-}
-[@@deriving yojson]
-
-type bridge_response_payload =
-  | Connected of bridge_connected
-  | Bridge_error of bridge_error
-[@@deriving yojson]
-
-type bridge_response = {
-  msg : string;
-  result : bridge_response_payload;
-}
-[@@deriving yojson]
-
-let make_bridge_request ~debug addr =
-  { msg = "connect"; address = addr; debug }
-
-let make_bridge_connected_ hostname =
-  { msg = "connected"; result = Connected { status = "connected"; hostname } }
-
-let make_bridge_error error =
-  { msg = "connected"; result = Bridge_error { status = "error"; error } }
-
-let parse_bridge_request json =
-  match bridge_request_of_yojson json with
-  | Ok req ->
-    begin match String.equal req.msg "connect" with
-    | true -> Ok (req.address, req.debug)
-    | false -> Error (Printf.sprintf "expected msg=connect, got %s" req.msg)
-    end
-  | Error e -> Error e
-
-let parse_bridge_response json =
-  match bridge_response_of_yojson json with
-  | Ok resp ->
-    begin match resp.result with
-    | Connected c -> Ok c
-    | Bridge_error e -> Error e.error
-    end
-  | Error e -> Error e
-
 let command_name : type req resp. (req, resp) command -> string = function
   | Register -> "register"
   | Open -> "open"

@@ -20,15 +20,15 @@ let make_client ?name ?brand ~host ~port ~debug () =
     push_incoming None);
   (* Send bridge handshake *)
   let addr : Protocol.listen_address = { host; port } in
-  let req = Protocol.make_bridge_request ~debug addr in
+  let req = Bridge_protocol.make_request ~debug addr in
   Chrome_api.Port.post_message_json native_port
-    (Yojson.Safe.to_string (Protocol.bridge_request_to_yojson req));
+    (Yojson.Safe.to_string (Bridge_protocol.request_to_yojson req));
   (* Wait for bridge response *)
   let* raw = Lwt_stream.next read_stream in
   let hostname =
     match Yojson.Safe.from_string raw with
     | json ->
-      begin match Protocol.parse_bridge_response json with
+      begin match Bridge_protocol.parse_response json with
       | Ok connected -> connected.hostname
       | Error _ -> ""
       end

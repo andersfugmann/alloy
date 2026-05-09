@@ -23,7 +23,7 @@
  (name main)
  (modules main bridge)
  (modes js)
- (libraries chrome_api client multiplexer page_util protocol constants js_of_ocaml lwt base stdio yojson)
+ (libraries chrome_api client multiplexer page_util bridge_protocol protocol constants js_of_ocaml lwt base stdio yojson)
  (js_of_ocaml
   (build_runtime_flags (:standard))
   (flags (:standard --Werror)))

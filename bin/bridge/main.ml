@@ -56,9 +56,9 @@ let run env =
   let handshake () : Protocol.listen_address option =
     let send_error msg =
       log (Stdlib.Printf.sprintf "handshake error: %s" msg);
-      let resp = Protocol.make_bridge_error msg in
+      let resp = Bridge_protocol.make_error msg in
       write_native_message_raw stdout_flow
-        (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
+        (Yojson.Safe.to_string (Bridge_protocol.response_to_yojson resp))
     in
     log "waiting for handshake";
     let rec await () =
@@ -68,7 +68,7 @@ let run env =
         None
       | Some json ->
         log (Stdlib.Printf.sprintf "received: %s" (Yojson.Safe.to_string json));
-        match Protocol.parse_bridge_request json with
+        match Bridge_protocol.parse_request json with
         | Ok (addr, debug) ->
           debug_enabled := debug;
           Some addr
@@ -99,9 +99,9 @@ let run env =
       let flow = connect_to_daemon ~sw net ~host ~port in
       log "connected to daemon";
       (* Send connected response to extension *)
-      let resp = Protocol.make_bridge_connected_ hostname in
+      let resp = Bridge_protocol.make_connected hostname in
       Eio.Stream.add stdout_stream
-        (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp));
+        (Yojson.Safe.to_string (Bridge_protocol.response_to_yojson resp));
       let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
       (* Transparent relay *)
       Eio.Fiber.first
@@ -126,9 +126,9 @@ let run env =
     | () -> log "relay finished"
     | exception exn ->
       log (Stdlib.Printf.sprintf "relay error: %s" (Exn.to_string exn));
-      let resp = Protocol.make_bridge_error (Exn.to_string exn) in
+      let resp = Bridge_protocol.make_error (Exn.to_string exn) in
       Eio.Stream.add stdout_stream
-        (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp))
+        (Yojson.Safe.to_string (Bridge_protocol.response_to_yojson resp))
   in
   Eio.Fiber.first write_stdout relay
 
