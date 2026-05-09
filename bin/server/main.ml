@@ -533,7 +533,7 @@ let rec receive_requests ~tenant inbox connection reader =
   | line ->
     let result =
       Result.bind (Protocol.deserialize_frame line) ~f:(fun frame ->
-        Protocol.parse_request_payload frame
+        Protocol.request_payload_of_yojson frame.payload
         |> Result.map ~f:(fun rp -> (frame, rp)))
     in
     match result with

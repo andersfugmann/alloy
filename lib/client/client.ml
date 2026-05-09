@@ -93,7 +93,7 @@ let init ~recv_s ~send_f ?name ?brand () =
   (* Wait for registered reply *)
   let* frame = Lwt_stream.next recv_s in
   let tenant =
-    match Protocol.parse_push_payload frame with
+    match Protocol.push_of_yojson frame.Protocol.payload with
     | Ok (Registered { tenant_id }) ->
       tenant_id
     | _ ->

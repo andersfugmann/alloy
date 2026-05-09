@@ -134,11 +134,7 @@ let parse_json_string s =
   | json -> Result.return json
   | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
-let json_to_string json =
-  Yojson.Safe.to_string json
-
 (* -- JSON identity for embedding raw JSON in wire envelopes *)
-(* TODO: Just use deriving on this *)
 type json = Yojson.Safe.t
 let json_to_yojson x = x
 let json_of_yojson x = Ok x
@@ -303,9 +299,6 @@ let make_request_frame : type req resp. (req, resp) command -> req -> int -> fra
   fun cmd request id ->
   { id; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
 
-let make_request_frame_raw ~command ~params ~id =
-  { id; payload = request_payload_to_yojson { command; params } }
-
 let make_response_frame id result =
   let rp =
     match result with
@@ -327,15 +320,6 @@ let deserialize_frame str =
   let* json = parse_json_string str in
   frame_of_yojson json
 
-let parse_request_payload frame =
-  request_payload_of_yojson frame.payload
-
-let parse_response_payload frame =
-  response_payload_of_yojson frame.payload
-
-let parse_push_payload frame =
-  push_of_yojson frame.payload
-
 (* -- Inline expect tests *)
 
 let%expect_test "request frame round-trip" =
@@ -345,7 +329,7 @@ let%expect_test "request frame round-trip" =
       let json_str = serialize_frame frame in
       match deserialize_frame json_str with
       | Ok frame2 ->
-        begin match parse_request_payload frame2 with
+        begin match request_payload_of_yojson frame2.payload with
         | Ok rp ->
           (match String.equal rp.command (command_name cmd) with
            | true -> printf "%s: ok\n" label
@@ -383,7 +367,7 @@ let%expect_test "response frame round-trip" =
     let json_str = serialize_frame frame in
     match deserialize_frame json_str with
     | Ok frame2 ->
-      begin match parse_response_payload frame2 with
+      begin match response_payload_of_yojson frame2.payload with
       | Ok (Success _) -> printf "%s: success\n" label
       | Ok (Failure msg) -> printf "%s: failure: %s\n" label msg
       | Error e -> printf "%s: FAIL: %s\n" label e
@@ -403,7 +387,7 @@ let%expect_test "push frame round-trip" =
     let json_str = serialize_frame frame in
     match deserialize_frame json_str with
     | Ok frame2 ->
-      begin match parse_push_payload frame2 with
+      begin match push_of_yojson frame2.payload with
       | Ok _ -> printf "%s: ok\n" label
       | Error e -> printf "%s: FAIL: %s\n" label e
       end
