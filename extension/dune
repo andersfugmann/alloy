@@ -8,7 +8,7 @@
 (library
  (name page_util)
  (modules page_util)
- (libraries chrome_api client protocol constants js_of_ocaml lwt base stdio)
+ (libraries chrome_api client multiplexer protocol constants js_of_ocaml lwt base stdio)
  (preprocess
   (pps js_of_ocaml-ppx)))
 
@@ -21,7 +21,7 @@
 
 (executable
  (name main)
- (modules main)
+ (modules main bridge)
  (modes js)
  (libraries chrome_api client multiplexer page_util protocol constants js_of_ocaml lwt base stdio yojson)
  (js_of_ocaml
