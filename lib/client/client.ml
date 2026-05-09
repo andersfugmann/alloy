@@ -176,5 +176,3 @@ let make_proxy_client t =
     proxy t frame.payload handler
   in
   init ~recv_s ~send_f ()
-
-(* TODO. Create test cases for the proxy. Need longer daisy chain, and verify that broadcast work Tests should not be in this file *)

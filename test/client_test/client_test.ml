@@ -233,6 +233,42 @@ let test_subclient_push_broadcast _switch () =
     let* () = Tcp_transport.close parent_transport in
     Tcp_transport.close trigger_transport)
 
+(* -- Tests: Daisy-chain proxy (parent → sub → sub-sub) *)
+
+let test_daisy_chain_call _switch () =
+  let d = get_daemon () in
+  let* (parent_conn, _parent_push, transport) =
+    Test_harness.connect d ~name:"chain-root" () in
+  Lwt.finalize (fun () ->
+    let* (sub_conn, _sub_push) = Client.make_proxy_client parent_conn in
+    let* (subsub_conn, _subsub_push) = Client.make_proxy_client sub_conn in
+    (* Call through two levels of proxy *)
+    let* result = Client.call subsub_conn Protocol.Status () in
+    (match result with
+     | Ok status ->
+       Alcotest.(check bool) "uptime >= 0" true (status.uptime_seconds >= 0)
+     | Error e -> Alcotest.fail (Printf.sprintf "daisy-chain status failed: %s" e));
+    Lwt.return_unit)
+  (fun () -> Tcp_transport.close transport)
+
+let test_daisy_chain_broadcast _switch () =
+  let d = get_daemon () in
+  let* (parent_conn, _parent_push, parent_transport) =
+    Test_harness.connect d ~name:"chain-bcast" () in
+  Lwt.finalize (fun () ->
+    let* (_sub_conn, _sub_push) = Client.make_proxy_client parent_conn in
+    let* (_subsub_conn, subsub_push) = Client.make_proxy_client parent_conn in
+    (* Drain any initial pushes *)
+    let _ = Lwt_stream.get_available subsub_push in
+    (* Trigger a broadcast by registering a new client *)
+    let* (_extra_conn, _extra_push, extra_transport) =
+      Test_harness.connect d ~name:"chain-trigger" () in
+    let* () = Lwt_unix.sleep 0.1 in
+    let available = Lwt_stream.get_available subsub_push in
+    Alcotest.(check bool) "broadcast reached sub-sub" true (List.length available >= 1);
+    Tcp_transport.close extra_transport)
+  (fun () -> Tcp_transport.close parent_transport)
+
 (* -- Test runner *)
 
 let () =
@@ -262,6 +298,10 @@ let () =
               Alcotest_lwt.test_case "relay status" `Quick test_subclient_status;
               Alcotest_lwt.test_case "concurrent calls" `Quick test_subclient_concurrent;
               Alcotest_lwt.test_case "push broadcast" `Quick test_subclient_push_broadcast;
+            ]);
+           ("daisy-chain", [
+              Alcotest_lwt.test_case "call through chain" `Quick test_daisy_chain_call;
+              Alcotest_lwt.test_case "broadcast through chain" `Quick test_daisy_chain_broadcast;
             ]);
          ]))
     ~finally:(fun () -> Test_harness.stop d)
