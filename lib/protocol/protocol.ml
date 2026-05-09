@@ -195,62 +195,51 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Connection_info -> "connection_info"
   | Lookup -> "lookup"
 
-(* TODO: fold the four serializer/deserializer functions into one match that returns all four functions (should be a tuple of tuples) (req_ser * rep_deser) * (req_deser * rep_ser) *)
-
-let request_serializer : type req resp. (req, resp) command -> (req -> Yojson.Safe.t) = function
-  | Register -> register_request_to_yojson
-  | Open -> open_request_to_yojson
-  | Open_on -> open_on_request_to_yojson
-  | Test -> open_request_to_yojson
-  | Get_config -> (fun () -> `Null)
-  | Set_config -> config_to_yojson
-  | Get_rules -> (fun () -> `Null)
-  | Set_rules -> rules_to_yojson
-  | Status -> (fun () -> `Null)
-  | Connection_info -> (fun () -> `Null)
-  | Lookup -> lookup_request_to_yojson
-
-let response_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (resp, string) Result.t) = function
+let command_codec : type req resp. (req, resp) command ->
+  ((req -> Yojson.Safe.t) * (Yojson.Safe.t -> (resp, string) Result.t)) *
+  ((Yojson.Safe.t -> (req, string) Result.t) * (resp -> Yojson.Safe.t)) = function
   | Register ->
-    (fun payload -> match payload with
-     | `String s -> Ok s
-     | _ -> Error "register: expected string")
-  | Open -> route_result_of_yojson
-  | Open_on -> route_result_of_yojson
-  | Test -> test_result_of_yojson
-  | Get_config -> config_of_yojson
-  | Set_config -> (fun _ -> Ok ())
-  | Get_rules -> rules_of_yojson
-  | Set_rules -> (fun _ -> Ok ())
-  | Status -> status_info_of_yojson
-  | Connection_info -> connection_info_of_yojson
-  | Lookup -> history_of_yojson
+    ((register_request_to_yojson,
+      (fun payload -> match payload with
+       | `String s -> Ok s
+       | _ -> Error "register: expected string")),
+     (register_request_of_yojson,
+      (fun s -> `String s)))
+  | Open ->
+    ((open_request_to_yojson, route_result_of_yojson),
+     (open_request_of_yojson, route_result_to_yojson))
+  | Open_on ->
+    ((open_on_request_to_yojson, route_result_of_yojson),
+     (open_on_request_of_yojson, route_result_to_yojson))
+  | Test ->
+    ((open_request_to_yojson, test_result_of_yojson),
+     (open_request_of_yojson, test_result_to_yojson))
+  | Get_config ->
+    (((fun () -> `Null), config_of_yojson),
+     ((fun _ -> Ok ()), config_to_yojson))
+  | Set_config ->
+    ((config_to_yojson, (fun _ -> Ok ())),
+     (config_of_yojson, (fun () -> `Null)))
+  | Get_rules ->
+    (((fun () -> `Null), rules_of_yojson),
+     ((fun _ -> Ok ()), rules_to_yojson))
+  | Set_rules ->
+    ((rules_to_yojson, (fun _ -> Ok ())),
+     (rules_of_yojson, (fun () -> `Null)))
+  | Status ->
+    (((fun () -> `Null), status_info_of_yojson),
+     ((fun _ -> Ok ()), status_info_to_yojson))
+  | Connection_info ->
+    (((fun () -> `Null), connection_info_of_yojson),
+     ((fun _ -> Ok ()), connection_info_to_yojson))
+  | Lookup ->
+    ((lookup_request_to_yojson, history_of_yojson),
+     (lookup_request_of_yojson, history_to_yojson))
 
-let request_deserializer : type req resp. (req, resp) command -> (Yojson.Safe.t -> (req, string) Result.t) = function
-  | Register -> register_request_of_yojson
-  | Open -> open_request_of_yojson
-  | Open_on -> open_on_request_of_yojson
-  | Test -> open_request_of_yojson
-  | Get_config -> (fun _ -> Ok ())
-  | Set_config -> config_of_yojson
-  | Get_rules -> (fun _ -> Ok ())
-  | Set_rules -> rules_of_yojson
-  | Status -> (fun _ -> Ok ())
-  | Connection_info -> (fun _ -> Ok ())
-  | Lookup -> lookup_request_of_yojson
-
-let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.Safe.t) = function
-  | Register -> (fun s -> `String s)
-  | Open -> route_result_to_yojson
-  | Open_on -> route_result_to_yojson
-  | Test -> test_result_to_yojson
-  | Get_config -> config_to_yojson
-  | Set_config -> (fun () -> `Null)
-  | Get_rules -> rules_to_yojson
-  | Set_rules -> (fun () -> `Null)
-  | Status -> status_info_to_yojson
-  | Connection_info -> connection_info_to_yojson
-  | Lookup -> history_to_yojson
+let request_serializer cmd = fst (fst (command_codec cmd))
+let response_deserializer cmd = snd (fst (command_codec cmd))
+let request_deserializer cmd = fst (snd (command_codec cmd))
+let response_serializer cmd = snd (snd (command_codec cmd))
 
 let make_request_frame : type req resp. (req, resp) command -> req -> int -> frame =
   fun cmd request correlation_id ->
