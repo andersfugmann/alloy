@@ -4,6 +4,8 @@ open! Stdio
 (* This is just a simple bridge to a client over Chrome channels *)
 (* TODO: Rename to port_multiplexer *)
 
+let log = Chrome_api.log
+
 let is_closed close_var =
   Lwt_mvar.is_empty close_var |> not
 
@@ -27,7 +29,7 @@ let handle_broadcast port close_var broadcast =
     |> Chrome_api.Port.post_message_json port
   | None -> close close_var
 
-let handle_response_payload port close_var id payload =
+let handle_response_payload port close_var correlation_id payload =
   let payload =
     match payload with
     | Some payload -> payload
@@ -35,7 +37,7 @@ let handle_response_payload port close_var id payload =
       close close_var; (* The var will not be closed untill this function ends. There are not scheduling points, its not a problem*)
       Protocol.Failure "Closed" |> Protocol.response_payload_to_yojson
   in
-  Protocol.{ id; payload }
+  Protocol.{ correlation_id; payload }
   |> Protocol.frame_to_yojson
   |> Yojson.Safe.to_string
   |> Chrome_api.Port.post_message_json port
@@ -46,16 +48,15 @@ let handle_receive client port close_var json_str =
     |> Protocol.frame_of_yojson
     |> Result.ok_or_failwith (* This is intended: Crash on broken invariant *)
   in
-  Client.proxy client frame.payload (handle_response_payload port close_var frame.id)
+  Client.proxy client frame.payload (handle_response_payload port close_var frame.correlation_id)
 
 let handle_message push json_string =
   Yojson.Safe.from_string json_string
   |> Protocol.frame_of_yojson
   |> (function
       | Ok json -> Some json
-      | Error _s ->
-        (* Close the connection on error! *)
-        (* TODO: log error *)
+      | Error s ->
+        log (Printf.sprintf "Error parsing frame: %s" s);
         None
     )
   |> push

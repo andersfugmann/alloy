@@ -104,7 +104,7 @@ let test_redirect _switch () =
     let rec await_navigate () =
       let* p = Lwt_stream.next target_push_stream in
       match p with
-      | Protocol.Navigate { url } ->
+      | Protocol.Navigate url ->
         Alcotest.(check string) "navigate url" "http://www.example.com/page" url;
         Lwt.return_unit
       | Protocol.Config_updated _ -> await_navigate ()

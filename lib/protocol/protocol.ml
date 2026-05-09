@@ -78,10 +78,9 @@ type test_result =
 
 type register_request = {
   brand : string option; [@default None]
-  address : string option; [@default None] (* TODO: Remove this *)
   name : string option; [@default None]
 }
-[@@deriving yojson]
+[@@deriving yojson { strict = false }]
 
 type open_request = {
   url : string;
@@ -125,24 +124,21 @@ type (_, _) command =
   | Connection_info : (unit, connection_info) command
   | Lookup : (lookup_request, history_entry list) command
 
-(* -- Helpers *)
-
-let ( let* ) r f = Result.bind r ~f
-
 let parse_json_string s =
   match Yojson.Safe.from_string s with
   | json -> Result.return json
   | exception Yojson.Json_error msg -> Result.failf "invalid JSON: %s" msg
 
 (* -- JSON identity for embedding raw JSON in wire envelopes *)
-type json = Yojson.Safe.t
-let json_to_yojson x = x
-let json_of_yojson x = Ok x
+type json = Yojson.Safe.t [@@deriving yojson]
 
 (* -- Unified wire frame *)
 
+(* TODO: parameterize on the payload type: type frame = 'payload frame { ... payload: 'payload }.
+   Then create type aliases e.g. basic_frame = json frame *)
+
 type frame = {
-  id : int;
+  correlation_id : int; [@key "id"]
   payload : json; [@default `Null]
 }
 [@@deriving yojson { strict = false }]
@@ -153,17 +149,23 @@ type request_payload = {
 }
 [@@deriving yojson]
 
+
+(* TODO: This should just be a Result. To serialize, overload result:
+   type ('a, string) response_payload : ('a, string) Result.t
+     | Ok of 'a
+     | Error of string [@@deriving yojson]
+
+   To keep a result type, and not invent our own.
+*)
 type response_payload =
   | Success of json
   | Failure of string
 [@@deriving yojson]
 
-(* -- Push messages *)
-(* TODO: Avoid single field records *)
 (* TODO: Registered should not be part of push message. Its a special message that is not a push message (unsolicited). *)
 type push =
-  | Navigate of { url : string }
-  | Registered of { tenant_id : string } (* TODO: Rename to tenant *)
+  | Navigate of string
+  | Registered of string
   | Config_updated of { config : config; registered_tenants : string list }
 [@@deriving yojson]
 
@@ -240,6 +242,8 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Connection_info -> "connection_info"
   | Lookup -> "lookup"
 
+(* TODO: fold the four serializer/deserializer functions into one match that returns all four functions (should be a tuple of tuples) (req_ser * rep_deser) * (req_deser * rep_ser) *)
+
 let request_serializer : type req resp. (req, resp) command -> (req -> Yojson.Safe.t) = function
   | Register -> register_request_to_yojson
   | Open -> open_request_to_yojson
@@ -296,20 +300,19 @@ let response_serializer : type req resp. (req, resp) command -> (resp -> Yojson.
   | Lookup -> history_to_yojson
 
 let make_request_frame : type req resp. (req, resp) command -> req -> int -> frame =
-  fun cmd request id ->
-  { id; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
+  fun cmd request correlation_id ->
+  { correlation_id; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
 
-let make_response_frame id result =
+let make_response_frame correlation_id result =
   let rp =
     match result with
     | Ok json -> Success json
     | Error msg -> Failure msg
   in
-  { id; payload = response_payload_to_yojson rp }
+  { correlation_id; payload = response_payload_to_yojson rp }
 
-(* TODO. Rename to make_frame: int -> Yojson.Basic.t *)
 let make_push_frame push =
-  { id = 0; payload = push_to_yojson push }
+  { correlation_id = 0; payload = push_to_yojson push }
 
 (* -- Frame serialization *)
 
@@ -317,6 +320,7 @@ let serialize_frame frame =
   frame_to_yojson frame |> Yojson.Safe.to_string
 
 let deserialize_frame str =
+  let ( let* ) r f = Result.bind r ~f in
   let* json = parse_json_string str in
   frame_of_yojson json
 
@@ -338,7 +342,7 @@ let%expect_test "request frame round-trip" =
         end
       | Error e -> printf "%s: FAIL frame: %s\n" label e
   in
-  test Register { brand = Some "Chrome"; address = None; name = None } "register";
+  test Register { brand = Some "Chrome"; name = None } "register";
   test Open { url = "https://x.com"; title = None } "open";
   test Open_on { target = "work"; url = "https://x.com"; title = Some "Example" } "open_on";
   test Test { url = "https://test.com"; title = None } "test";
@@ -393,8 +397,8 @@ let%expect_test "push frame round-trip" =
       end
     | Error e -> printf "%s: FAIL: %s\n" label e
   in
-  test "navigate" (Navigate { url = "https://x.com" });
-  test "registered" (Registered { tenant_id = "test" });
+  test "navigate" (Navigate "https://x.com");
+  test "registered" (Registered "test");
   test "config_updated" (Config_updated {
     config = {
       listen = []; allowed_networks = []; tenants = [];

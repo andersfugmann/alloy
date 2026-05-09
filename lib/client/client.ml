@@ -31,7 +31,7 @@ let close_clients state =
 let handle_message ~send_f state = function
   | Close ->
     close_clients state
-  | Packet { id=0; payload } ->
+  | Packet { correlation_id = 0; payload } ->
     let push_msg = match Protocol.push_of_yojson payload with
       | Ok push -> Some push
       | Error _s ->
@@ -47,24 +47,24 @@ let handle_message ~send_f state = function
         ) state.listeners
     in
     { state with listeners }
-  | Packet { id; payload } ->
-    let pending = match List.Assoc.find state.pending ~equal:Int.equal id with
+  | Packet { correlation_id; payload } ->
+    let pending = match List.Assoc.find state.pending ~equal:Int.equal correlation_id with
       | None -> state.pending
       | Some handler ->
         handler (Some payload);
-        List.Assoc.remove state.pending ~equal:Int.equal id
+        List.Assoc.remove state.pending ~equal:Int.equal correlation_id
     in
     { state with pending }
   | Request (req, rep_handler) when is_registration_request req ->
     let reply =
-      Protocol.(Registered { tenant_id = state.tenant })
+      Protocol.(Registered state.tenant)
       |> Protocol.push_to_yojson
     in
     rep_handler (Some reply);
     state
 
   | Request (req, rep_handler) ->
-    send_f Protocol.{ id = state.next_id; payload = req };
+    send_f Protocol.{ correlation_id = state.next_id; payload = req };
     let pending = (state.next_id, rep_handler) :: state.pending in
     { state with next_id = state.next_id + 1; pending }
 
@@ -87,14 +87,14 @@ let close t =
 let init ~recv_s ~send_f ?name ?brand () =
   (* Create a stream for receiving events *)
   let stream, push = Lwt_stream.create () in
-  let register_req = Protocol.{ brand; address = None; name } in
+  let register_req = Protocol.{ brand; name } in
   let frame = Protocol.make_request_frame Register register_req 0 in
   send_f frame;
   (* Wait for registered reply *)
   let* frame = Lwt_stream.next recv_s in
   let tenant =
     match Protocol.push_of_yojson frame.Protocol.payload with
-    | Ok (Registered { tenant_id }) ->
+    | Ok (Registered tenant_id) ->
       tenant_id
     | _ ->
       failwith "Unexpected packet received while waiting for registration reply"
@@ -166,7 +166,7 @@ let make_proxy_client t =
 
   let send_f frame =
     let handler payload =
-      let frame = Option.map ~f:(fun payload -> Protocol.{ id = frame.id; payload }) payload in
+      let frame = Option.map ~f:(fun payload -> Protocol.{ correlation_id = frame.correlation_id; payload }) payload in
       push frame
     in
     proxy t frame.payload handler

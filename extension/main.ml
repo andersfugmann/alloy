@@ -103,7 +103,7 @@ let delete_matching_rule url =
 
 let handle_broadcast push_opt =
   match push_opt with
-  | Some (Protocol.Navigate { url }) ->
+  | Some (Protocol.Navigate url) ->
     log (Printf.sprintf "Received NAVIGATE push: %s" url);
     create_tab url
   | Some (Config_updated { config = cfg; registered_tenants }) ->
