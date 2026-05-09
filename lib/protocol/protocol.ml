@@ -134,14 +134,26 @@ type json = Yojson.Safe.t [@@deriving yojson]
 
 (* -- Unified wire frame *)
 
-(* TODO: parameterize on the payload type: type frame = 'payload frame { ... payload: 'payload }.
-   Then create type aliases e.g. basic_frame = json frame *)
-
-type frame = {
-  correlation_id : int; [@key "id"]
-  payload : json; [@default `Null]
+type 'a frame = {
+  correlation_id : int;
+  payload : 'a;
 }
-[@@deriving yojson { strict = false }]
+
+let frame_to_yojson (frame : json frame) : Yojson.Safe.t =
+  `Assoc [("id", `Int frame.correlation_id); ("payload", frame.payload)]
+
+let frame_of_yojson : Yojson.Safe.t -> (json frame, string) Result.t = function
+  | `Assoc pairs ->
+    let correlation_id = match List.Assoc.find pairs ~equal:String.equal "id" with
+      | Some (`Int n) -> Ok n
+      | _ -> Error "frame: missing or invalid 'id'"
+    in
+    let payload = match List.Assoc.find pairs ~equal:String.equal "payload" with
+      | Some json -> json
+      | None -> `Null
+    in
+    Result.map correlation_id ~f:(fun correlation_id -> { correlation_id; payload })
+  | _ -> Error "frame: expected JSON object"
 
 type request_payload = {
   command : string;
@@ -241,7 +253,7 @@ let response_deserializer cmd = snd (fst (command_codec cmd))
 let request_deserializer cmd = fst (snd (command_codec cmd))
 let response_serializer cmd = snd (snd (command_codec cmd))
 
-let make_request_frame : type req resp. (req, resp) command -> req -> int -> frame =
+let make_request_frame : type req resp. (req, resp) command -> req -> int -> json frame =
   fun cmd request correlation_id ->
   { correlation_id; payload = request_payload_to_yojson { command = command_name cmd; params = request_serializer cmd request } }
 

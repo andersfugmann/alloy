@@ -4,7 +4,7 @@ open! Lwt.Syntax
 
 type message =
   | Close
-  | Packet of Protocol.frame
+  | Packet of Protocol.json Protocol.frame
   | Request of Protocol.json * (Protocol.json option -> unit)
   | Register of (Protocol.push option -> unit)
 

@@ -5,8 +5,8 @@ let ( let* ) = Lwt.bind
 
 type t = {
   lwt_fd : Lwt_unix.file_descr;
-  recv_s : Protocol.frame Lwt_stream.t;
-  send_f : Protocol.frame -> unit;
+  recv_s : Protocol.json Protocol.frame Lwt_stream.t;
+  send_f : Protocol.json Protocol.frame -> unit;
 }
 
 let connect ~host ~port =

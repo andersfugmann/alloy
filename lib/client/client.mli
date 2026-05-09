@@ -1,8 +1,8 @@
 type t
 
 val init :
-  recv_s:Protocol.frame Lwt_stream.t ->
-  send_f:(Protocol.frame -> unit) ->
+  recv_s:Protocol.json Protocol.frame Lwt_stream.t ->
+  send_f:(Protocol.json Protocol.frame -> unit) ->
   ?name:string ->
   ?brand:string -> unit -> (t * Protocol.push Lwt_stream.t) Lwt.t
 
