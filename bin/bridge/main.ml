@@ -99,7 +99,7 @@ let run env =
       let flow = connect_to_daemon ~sw net ~host ~port in
       log "connected to daemon";
       (* Send connected response to extension *)
-      let resp = Protocol.make_bridge_connected hostname in
+      let resp = Protocol.make_bridge_connected_ hostname in
       Eio.Stream.add stdout_stream
         (Yojson.Safe.to_string (Protocol.bridge_response_to_yojson resp));
       let reader = Eio.Buf_read.of_flow ~max_size:Constants.max_read_buffer flow in
