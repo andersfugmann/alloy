@@ -32,19 +32,26 @@ let handle_message ~send_f state = function
   | Close ->
     close_clients state
   | Packet { correlation_id = 0; payload } ->
-    let push_msg = match Protocol.push_of_yojson payload with
-      | Ok push -> Some push
+    let notification = match Protocol.notification_of_yojson payload with
+      | Ok n -> Some n
       | Error _s ->
         let _ = close_clients state in
-        failwith "Could not decode push payload"
+        failwith "Could not decode notification payload"
     in
-    (* Send packets to all listeners. Any listener that errors should be removed *)
-    let listeners =
-      List.fold ~init:[] ~f:(fun acc handler ->
-          match handler push_msg with
-          | () -> handler :: acc
-          | exception _ -> acc
-        ) state.listeners
+    let push_msg = match notification with
+      | Some (Broadcast push) -> Some (Some push)
+      | Some (Registered _) -> None
+      | None -> Some None
+    in
+    (* Only forward broadcast pushes to listeners *)
+    let listeners = match push_msg with
+      | Some push_msg ->
+        List.fold ~init:[] ~f:(fun acc handler ->
+            match handler push_msg with
+            | () -> handler :: acc
+            | exception _ -> acc
+          ) state.listeners
+      | None -> state.listeners
     in
     { state with listeners }
   | Packet { correlation_id; payload } ->
@@ -58,7 +65,7 @@ let handle_message ~send_f state = function
   | Request (req, rep_handler) when is_registration_request req ->
     let reply =
       Protocol.(Registered state.tenant)
-      |> Protocol.push_to_yojson
+      |> Protocol.notification_to_yojson
     in
     rep_handler (Some reply);
     state
@@ -93,7 +100,7 @@ let init ~recv_s ~send_f ?name ?brand () =
   (* Wait for registered reply *)
   let* frame = Lwt_stream.next recv_s in
   let tenant =
-    match Protocol.push_of_yojson frame.Protocol.payload with
+    match Protocol.notification_of_yojson frame.Protocol.payload with
     | Ok (Registered tenant_id) ->
       tenant_id
     | _ ->

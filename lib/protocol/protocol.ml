@@ -161,12 +161,26 @@ let response_payload_of_yojson : Yojson.Safe.t -> (response_payload, string) Res
   | `List [`String "Error"; `String msg] -> Ok (Error msg)
   | _ -> Error "response_payload: expected [\"Ok\", ...] or [\"Error\", ...]"
 
-(* TODO: Registered should not be part of push message. Its a special message that is not a push message (unsolicited). *)
 type push =
   | Navigate of string
-  | Registered of string
   | Config_updated of { config : config; registered_tenants : string list }
 [@@deriving yojson]
+
+type notification =
+  | Broadcast of push
+  | Registered of string
+
+let notification_to_yojson = function
+  | Broadcast push -> push_to_yojson push
+  | Registered tenant -> `List [`String "Registered"; `String tenant]
+
+let notification_of_yojson json =
+  match push_of_yojson json with
+  | Ok push -> Ok (Broadcast push)
+  | Error _ ->
+    match json with
+    | `List [`String "Registered"; `String tenant] -> Ok (Registered tenant)
+    | _ -> Error "notification: expected push or Registered"
 
 let command_name : type req resp. (req, resp) command -> string = function
   | Register -> "register"
@@ -247,6 +261,9 @@ let make_response_frame correlation_id result =
 
 let make_push_frame push =
   { correlation_id = 0; payload = push_to_yojson push }
+
+let make_notification_frame notification =
+  { correlation_id = 0; payload = notification_to_yojson notification }
 
 (* -- Frame serialization *)
 
@@ -332,7 +349,6 @@ let%expect_test "push frame round-trip" =
     | Error e -> printf "%s: FAIL: %s\n" label e
   in
   test "navigate" (Navigate "https://x.com");
-  test "registered" (Registered "test");
   test "config_updated" (Config_updated {
     config = {
       listen = []; allowed_networks = []; tenants = [];
@@ -342,8 +358,26 @@ let%expect_test "push frame round-trip" =
   });
   [%expect {|
     navigate: ok
-    registered: ok
     config_updated: ok
+    |}]
+
+let%expect_test "notification frame round-trip" =
+  let test label notification =
+    let frame = make_notification_frame notification in
+    let json_str = serialize_frame frame in
+    match deserialize_frame json_str with
+    | Ok frame2 ->
+      begin match notification_of_yojson frame2.payload with
+      | Ok _ -> printf "%s: ok\n" label
+      | Error e -> printf "%s: FAIL: %s\n" label e
+      end
+    | Error e -> printf "%s: FAIL: %s\n" label e
+  in
+  test "broadcast/navigate" (Broadcast (Navigate "https://x.com"));
+  test "registered" (Registered "test");
+  [%expect {|
+    broadcast/navigate: ok
+    registered: ok
     |}]
 
 let%expect_test "response round-trip" =

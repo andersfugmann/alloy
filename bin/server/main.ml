@@ -352,7 +352,7 @@ let update_tenant_config state tenant brand =
 let handle_register params env ~respond:_ =
   let registry = Map.set env.state.registry ~key:env.tenant ~data:env.connection in
   (* Send Registered push instead of response (registration is fire-and-forget) *)
-  let push_str = Protocol.serialize_frame (Protocol.make_push_frame (Registered env.tenant)) in
+  let push_str = Protocol.serialize_frame (Protocol.make_notification_frame (Registered env.tenant)) in
   Eio.Stream.add env.connection.push_stream push_str;
   log "tenant %s registered (brand=%s)" env.tenant (Option.value params.Protocol.brand ~default:"(none)");
   { env.state with registry }

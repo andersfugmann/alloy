@@ -108,7 +108,6 @@ let test_redirect _switch () =
         Alcotest.(check string) "navigate url" "http://www.example.com/page" url;
         Lwt.return_unit
       | Protocol.Config_updated _ -> await_navigate ()
-      | _ -> Alcotest.fail "expected Navigate push on target"
     in
     await_navigate ())
   (fun () ->

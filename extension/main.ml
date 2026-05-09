@@ -114,7 +114,6 @@ let handle_broadcast push_opt =
       (id, tc.Protocol.label, Set.mem registered_set id)) in
     let self_id = Option.map !client_ref ~f:Client.name in
     setup_context_menus tenants self_id
-  | Some (Registered _) -> ()
   | None -> ()
 
 (* -- Chrome event handlers (direct callbacks) *)
