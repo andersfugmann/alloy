@@ -15,7 +15,7 @@ type state = {
   listeners: (Protocol.push option -> unit) list;
 }
 
-type t = { push: (message option -> unit); tenant: string; }
+type t = { push: (message option -> unit); tenant: string; closed: unit Lwt.t; signal_closed: unit Lwt.u }
 
 let is_registration_request payload =
   let cmd = Protocol.command_name Register in
@@ -71,9 +71,18 @@ let handle_message ~send_f state = function
   | Register listener ->
     { state with listeners = listener :: state.listeners }
 
+let is_closed t =
+  match Lwt.state t.closed with
+  | Lwt.Return () -> false
+  | _ -> true
+
 let close t =
-  t.push (Some Close);
-  t.push None
+  match is_closed t with
+  | true -> ()
+  | false ->
+    t.push (Some Close);
+    t.push None;
+    Lwt.wakeup t.signal_closed ()
 
 let init ~recv_s ~send_f ?name ?brand () =
   (* Create a stream for receiving events *)
@@ -90,22 +99,22 @@ let init ~recv_s ~send_f ?name ?brand () =
     | _ ->
       failwith "Unexpected packet received while waiting for registration reply"
   in
-  let t = { push; tenant; } in
+  let closed, signal_closed = Lwt.wait () in
+  let t = { push; tenant; closed; signal_closed } in
   (* Register for broadcasts *)
   let broadcast_stream, broadcast_push = Lwt_stream.create () in
   push (Some (Register broadcast_push));
-  Lwt.dont_wait (fun () ->
+  Lwt.async (fun () ->
       let* () = Lwt_stream.iter (fun frame -> push (Some (Packet frame))) recv_s in
       Lwt.return (close t)
-    ) raise;
-  Lwt.dont_wait (fun () ->
+    );
+  Lwt.async (fun () ->
       Lwt_stream.fold
         (fun msg state -> handle_message ~send_f state msg)
         stream
         { next_id = 1; pending = []; listeners = []; tenant }
-      |> Lwt.map (fun _ -> ())
-    ) raise;
-  (* And return what we promised *)
+      |> Lwt.map (fun _ -> close t; ())
+    );
   Lwt.return (t, broadcast_stream)
 
 (* Send messages though the client from another client *)
@@ -116,7 +125,11 @@ let proxy t payload handler =
 let call : type req resp. t -> (req, resp) Protocol.command -> req ->
   (resp, string) Result.t Lwt.t = fun client cmd request ->
   let (promise, resolver) = Lwt.wait () in
-  let request = Protocol.request_serializer cmd request in
+  let payload =
+    Protocol.request_payload_to_yojson
+      { command = Protocol.command_name cmd;
+        params = Protocol.request_serializer cmd request }
+  in
   let response_handler json =
     let response =
       let (let*) a f = Result.bind ~f a in
@@ -130,13 +143,14 @@ let call : type req resp. t -> (req, resp) Protocol.command -> req ->
     in
     Lwt.wakeup resolver response
   in
-  proxy client request response_handler;
+  proxy client payload response_handler;
   promise
 
 
 let register_broadcast t callback =
   t.push (Some (Register callback))
 
+let closed t = t.closed
 let name t = t.tenant
 
 (** Helper functions to connect a client to a client *)

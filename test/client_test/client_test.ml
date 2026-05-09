@@ -14,24 +14,24 @@ let get_daemon () =
 (* -- Helper: connect, run test, then close *)
 let with_client ~name f _switch () =
   let d = get_daemon () in
-  let* (conn, events, transport) = Test_harness.connect d ~name () in
+  let* (conn, push_stream, transport) = Test_harness.connect d ~name () in
   Lwt.finalize
-    (fun () -> f conn events)
+    (fun () -> f conn push_stream)
     (fun () -> Tcp_transport.close transport)
 
 (* -- Tests: Registration *)
 
-let test_registration = with_client ~name:"reg-test" (fun conn _events ->
-  Alcotest.(check string) "registered as reg-test" "reg-test" (Client.tenant_name conn);
+let test_registration = with_client ~name:"reg-test" (fun conn _push_stream ->
+  Alcotest.(check string) "registered as reg-test" "reg-test" (Client.name conn);
   Lwt.return_unit)
 
-let test_registration_with_tenant = with_client ~name:"my-tenant" (fun conn _events ->
-  Alcotest.(check string) "registered as my-tenant" "my-tenant" (Client.tenant_name conn);
+let test_registration_with_tenant = with_client ~name:"my-tenant" (fun conn _push_stream ->
+  Alcotest.(check string) "registered as my-tenant" "my-tenant" (Client.name conn);
   Lwt.return_unit)
 
 (* -- Tests: Commands *)
 
-let test_status = with_client ~name:"status-test" (fun conn _events ->
+let test_status = with_client ~name:"status-test" (fun conn _push_stream ->
   let* result = Client.call conn Protocol.Status () in
   (match result with
    | Ok status ->
@@ -39,7 +39,7 @@ let test_status = with_client ~name:"status-test" (fun conn _events ->
    | Error e -> Alcotest.fail (Printf.sprintf "status failed: %s" e));
   Lwt.return_unit)
 
-let test_get_config = with_client ~name:"config-test" (fun conn _events ->
+let test_get_config = with_client ~name:"config-test" (fun conn _push_stream ->
   let* result = Client.call conn Protocol.Get_config () in
   (match result with
    | Ok config ->
@@ -50,7 +50,7 @@ let test_get_config = with_client ~name:"config-test" (fun conn _events ->
    | Error e -> Alcotest.fail (Printf.sprintf "get_config failed: %s" e));
   Lwt.return_unit)
 
-let test_get_rules = with_client ~name:"rules-test" (fun conn _events ->
+let test_get_rules = with_client ~name:"rules-test" (fun conn _push_stream ->
   let* result = Client.call conn Protocol.Get_rules () in
   (match result with
    | Ok rules ->
@@ -58,7 +58,7 @@ let test_get_rules = with_client ~name:"rules-test" (fun conn _events ->
    | Error e -> Alcotest.fail (Printf.sprintf "get_rules failed: %s" e));
   Lwt.return_unit)
 
-let test_set_rules = with_client ~name:"set-rules-test" (fun conn _events ->
+let test_set_rules = with_client ~name:"set-rules-test" (fun conn _push_stream ->
   let new_rules : Protocol.rule list = [
     { pattern = "https://new[.]example[.]com/.*"; target = "test-tenant"; enabled = true };
   ] in
@@ -87,10 +87,10 @@ let test_set_rules = with_client ~name:"set-rules-test" (fun conn _events ->
 let test_redirect _switch () =
   let d = get_daemon () in
   (* Target client registers as "test-tenant" *)
-  let* (_target_conn, target_events, target_transport) =
+  let* (_target_conn, target_push_stream, target_transport) =
     Test_harness.connect d ~name:"test-tenant" () in
   (* Source client registers as "source" *)
-  let* (src_conn, _src_events, src_transport) =
+  let* (src_conn, _src_push_stream, src_transport) =
     Test_harness.connect d ~name:"source" () in
   Lwt.finalize (fun () ->
     (* Source opens a URL matching the rule → should route to test-tenant *)
@@ -102,12 +102,12 @@ let test_redirect _switch () =
      | Error e -> Alcotest.fail (Printf.sprintf "open failed: %s" e));
     (* Target should receive Navigate push (skip Config_updated pushes) *)
     let rec await_navigate () =
-      let* ev = Lwt_stream.next target_events in
-      match ev with
-      | Client.Push (Protocol.Navigate { url }) ->
+      let* p = Lwt_stream.next target_push_stream in
+      match p with
+      | Protocol.Navigate { url } ->
         Alcotest.(check string) "navigate url" "http://www.example.com/page" url;
         Lwt.return_unit
-      | Client.Push (Protocol.Config_updated _) -> await_navigate ()
+      | Protocol.Config_updated _ -> await_navigate ()
       | _ -> Alcotest.fail "expected Navigate push on target"
     in
     await_navigate ())
@@ -115,7 +115,7 @@ let test_redirect _switch () =
     let* () = Tcp_transport.close target_transport in
     Tcp_transport.close src_transport)
 
-let test_no_redirect = with_client ~name:"no-redir" (fun conn _events ->
+let test_no_redirect = with_client ~name:"no-redir" (fun conn _push_stream ->
   (* URL doesn't match any rule → Local *)
   let* result = Client.call conn Protocol.Open { url = "http://www.other.com/page"; title = None } in
   (match result with
@@ -124,7 +124,7 @@ let test_no_redirect = with_client ~name:"no-redir" (fun conn _events ->
    | Error e -> Alcotest.fail (Printf.sprintf "open failed: %s" e));
   Lwt.return_unit)
 
-let test_self_open = with_client ~name:"test-tenant" (fun conn _events ->
+let test_self_open = with_client ~name:"test-tenant" (fun conn _push_stream ->
   (* Client registered as "test-tenant" opens URL targeting its own tenant → forced local *)
   let* result = Client.call conn Protocol.Open { url = "http://www.example.com/self"; title = None } in
   (match result with
@@ -136,10 +136,10 @@ let test_self_open = with_client ~name:"test-tenant" (fun conn _events ->
 let test_cooldown _switch () =
   let d = get_daemon () in
   (* Target must be registered to receive redirects *)
-  let* (_target_conn, _target_events, target_transport) =
+  let* (_target_conn, _target_push_stream, target_transport) =
     Test_harness.connect d ~name:"test-tenant" () in
   (* Source client *)
-  let* (src_conn, _src_events, src_transport) =
+  let* (src_conn, _src_push_stream, src_transport) =
     Test_harness.connect d ~name:"cooldown-src" () in
   Lwt.finalize (fun () ->
     let url = "http://www.example.com/cooldown-test" in
@@ -170,96 +170,65 @@ let test_cooldown _switch () =
 
 (* -- Tests: Sub-client proxy *)
 
-(* Helper: read from subclient_read, skipping pushes (id=0), return first response *)
-let await_subclient_response stream =
-  let rec loop () =
-    let* raw = Lwt_stream.next stream in
-    match Protocol.deserialize_frame raw with
-    | Error _ -> loop ()
-    | Ok frame ->
-      match frame.Protocol.id with
-      | 0 -> loop ()
-      | _ -> Lwt.return (raw, frame)
-  in
-  loop ()
-
 let test_subclient_status _switch () =
   let d = get_daemon () in
-  let* (_conn, _events, transport) = Test_harness.connect d ~name:"proxy-parent" () in
+  let* (parent_conn, _parent_push_stream, transport) =
+    Test_harness.connect d ~name:"proxy-parent" () in
   Lwt.finalize (fun () ->
-    let conn = _conn in
-    (* Verify the connection works with a normal call first *)
-    let* _result = Client.call conn Protocol.Status () in
-    (* Build a subclient frame: Status command with id=99 *)
-    let frame = Protocol.make_request_frame Protocol.Status () 99 in
-    let raw = Protocol.serialize_frame frame in
-    Client.subclient_write conn raw;
-    (* Read subclient_read — response should have original id restored *)
-    let* (_resp_raw, resp) = await_subclient_response (Client.subclient_read conn) in
-    Alcotest.(check int) "id restored" 99 resp.id;
-    (* Verify payload is a success response with status info *)
-    (match Protocol.parse_response_payload resp with
-     | Ok (Protocol.Success _) -> ()
-     | Ok (Protocol.Failure msg) -> Alcotest.fail (Printf.sprintf "status failed: %s" msg)
-     | Error e -> Alcotest.fail (Printf.sprintf "parse response payload: %s" e));
+    (* Verify the parent connection works *)
+    let* _result = Client.call parent_conn Protocol.Status () in
+    (* Create a proxy sub-client *)
+    let* (sub_conn, _sub_push_stream) = Client.make_proxy_client parent_conn in
+    (* Make a call through the sub-client *)
+    let* result = Client.call sub_conn Protocol.Status () in
+    (match result with
+     | Ok status ->
+       Alcotest.(check bool) "uptime >= 0" true (status.uptime_seconds >= 0)
+     | Error e -> Alcotest.fail (Printf.sprintf "subclient status failed: %s" e));
     Lwt.return_unit)
   (fun () -> Tcp_transport.close transport)
 
-let test_subclient_id_rewriting _switch () =
+let test_subclient_concurrent _switch () =
   let d = get_daemon () in
-  let* (_conn, _events, transport) = Test_harness.connect d ~name:"proxy-rewrite" () in
+  let* (parent_conn, _parent_push_stream, transport) =
+    Test_harness.connect d ~name:"proxy-rewrite" () in
   Lwt.finalize (fun () ->
-    let conn = _conn in
-    (* Verify connection works *)
-    let* _result = Client.call conn Protocol.Status () in
-    (* Send two subclient requests with the same id=1 *)
-    let frame1 = Protocol.make_request_frame Protocol.Status () 1 in
-    let frame2 = Protocol.make_request_frame Protocol.Get_rules () 1 in
-    Client.subclient_write conn (Protocol.serialize_frame frame1);
-    Client.subclient_write conn (Protocol.serialize_frame frame2);
-    (* Both should get responses with their original id=1 *)
-    let stream = Client.subclient_read conn in
-    let* (_raw1, resp1) = await_subclient_response stream in
-    let* (_raw2, resp2) = await_subclient_response stream in
-    Alcotest.(check int) "first: id" 1 resp1.id;
-    Alcotest.(check int) "second: id" 1 resp2.id;
+    let* _result = Client.call parent_conn Protocol.Status () in
+    let* (sub_conn, _sub_push_stream) = Client.make_proxy_client parent_conn in
+    (* Send two concurrent requests through the proxy sub-client *)
+    let p1 = Client.call sub_conn Protocol.Status () in
+    let p2 = Client.call sub_conn Protocol.Get_rules () in
+    let* result1 = p1 in
+    let* result2 = p2 in
+    (match result1 with
+     | Ok _ -> ()
+     | Error e -> Alcotest.fail (Printf.sprintf "first call failed: %s" e));
+    (match result2 with
+     | Ok _ -> ()
+     | Error e -> Alcotest.fail (Printf.sprintf "second call failed: %s" e));
     Lwt.return_unit)
   (fun () -> Tcp_transport.close transport)
 
 let test_subclient_push_broadcast _switch () =
   let d = get_daemon () in
-  (* Parent client with subclient channel *)
-  let* (parent_conn, _parent_events, parent_transport) =
+  let* (parent_conn, _parent_push_stream, parent_transport) =
     Test_harness.connect d ~name:"proxy-bcast" () in
-  (* Another client that will trigger a push *)
-  let* (trigger_conn, _trigger_events, trigger_transport) =
+  let* (trigger_conn, _trigger_push_stream, trigger_transport) =
     Test_harness.connect d ~name:"trigger" () in
   Lwt.finalize (fun () ->
-    (* Source opens a URL matching a rule → target (test-tenant) gets Navigate push.
-       The parent_conn also receives the push on its subclient_read (it receives ALL pushes). *)
     let* _result = Client.call trigger_conn Protocol.Get_config () in
-    (* Config_updated pushes are sent on registration — consume them first *)
-    let rec drain_pushes () =
-      match Lwt_stream.get_available (Client.subclient_read parent_conn) with
-      | [] -> ()
-      | _ -> drain_pushes ()
-    in
-    drain_pushes ();
-    (* Now trigger an action that sends a push to our parent client:
-       Register a third client that will cause Config_updated push to parent *)
-    let* (_extra_conn, _extra_events, extra_transport) =
+    (* Create a proxy sub-client — it should receive broadcast pushes *)
+    let* (_sub_conn, sub_push_stream) = Client.make_proxy_client parent_conn in
+    (* Drain any initial Config_updated pushes *)
+    let _ = Lwt_stream.get_available sub_push_stream in
+    (* Register a third client → causes Config_updated push *)
+    let* (_extra_conn, _extra_push_stream, extra_transport) =
       Test_harness.connect d ~name:"extra" () in
     (* Wait briefly for the push to propagate *)
     let* () = Lwt_unix.sleep 0.1 in
-    (* subclient_read should have the raw Config_updated push *)
-    let available = Lwt_stream.get_available (Client.subclient_read parent_conn) in
-    Alcotest.(check bool) "got push on subclient_read" true (List.length available >= 1);
-    (* Verify it's a push frame (id=0) *)
-    let raw = List.hd_exn available in
-    (match Protocol.deserialize_frame raw with
-     | Error e -> Alcotest.fail (Printf.sprintf "parse push: %s" e)
-     | Ok frame ->
-       Alcotest.(check int) "push id is 0" 0 frame.id);
+    (* sub_push_stream should have the Config_updated push *)
+    let available = Lwt_stream.get_available sub_push_stream in
+    Alcotest.(check bool) "got push on subclient" true (List.length available >= 1);
     Tcp_transport.close extra_transport)
   (fun () ->
     let* () = Tcp_transport.close parent_transport in
@@ -292,7 +261,7 @@ let () =
             ]);
            ("subclient", [
               Alcotest_lwt.test_case "relay status" `Quick test_subclient_status;
-              Alcotest_lwt.test_case "id rewriting" `Quick test_subclient_id_rewriting;
+              Alcotest_lwt.test_case "concurrent calls" `Quick test_subclient_concurrent;
               Alcotest_lwt.test_case "push broadcast" `Quick test_subclient_push_broadcast;
             ]);
          ]))

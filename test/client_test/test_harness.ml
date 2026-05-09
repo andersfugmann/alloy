@@ -92,10 +92,10 @@ let stop daemon =
 
 let connect daemon ~name () =
   let* transport = Tcp_transport.connect ~host:"127.0.0.1" ~port:daemon.port in
-  let* (conn, events) = Client.init
-    ~write:transport.write
-    ~read:transport.read
+  let* (conn, push_stream) = Client.init
+    ~recv_s:transport.recv_s
+    ~send_f:transport.send_f
     ~name
     ()
   in
-  Lwt.return (conn, events, transport)
+  Lwt.return (conn, push_stream, transport)

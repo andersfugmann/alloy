@@ -10,5 +10,7 @@ val close : t -> unit
 val call : t -> ('req, 'resp) Protocol.command -> 'req -> ('resp, string) Result.t Lwt.t
 val proxy : t -> Protocol.json -> (Protocol.json option -> unit) -> unit
 val register_broadcast : t -> (Protocol.push option -> unit) -> unit
+val closed: t -> unit Lwt.t
+val is_closed: t -> bool
 val name : t -> string
 val make_proxy_client : t -> (t * Protocol.push Lwt_stream.t) Lwt.t
