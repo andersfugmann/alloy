@@ -16,15 +16,15 @@ let close close_var =
       | true -> Lwt.return ()
     )
 
-let handle_broadcast port close_var broadcast =
+let handle_broadcast port close_var push =
   let () = match is_closed close_var with
     | true -> raise Lwt_stream.Closed
     | false -> ()
   in
-  match broadcast with
-  | Some broadcast ->
-    Protocol.make_push_frame broadcast
-    |> Protocol.frame_to_yojson
+  match push with
+  | Some push ->
+    Protocol.make_push_frame push
+    |> Protocol.raw_frame_to_yojson
     |> Yojson.Safe.to_string
     |> Chrome_api.Port.post_message_json port
   | None -> close close_var
@@ -38,21 +38,21 @@ let handle_response_payload port close_var correlation_id payload =
       Protocol.response_payload_to_yojson (Error "Closed")
   in
   Protocol.{ correlation_id; payload }
-  |> Protocol.frame_to_yojson
+  |> Protocol.raw_frame_to_yojson
   |> Yojson.Safe.to_string
   |> Chrome_api.Port.post_message_json port
 
 let handle_receive client port close_var json_str =
   let frame =
     Yojson.Safe.from_string json_str
-    |> Protocol.frame_of_yojson
+    |> Protocol.raw_frame_of_yojson
     |> Result.ok_or_failwith (* This is intended: Crash on broken invariant *)
   in
   Client.proxy client frame.payload (handle_response_payload port close_var frame.correlation_id)
 
 let handle_message push json_string =
   Yojson.Safe.from_string json_string
-  |> Protocol.frame_of_yojson
+  |> Protocol.raw_frame_of_yojson
   |> (function
       | Ok json -> Some json
       | Error s ->
@@ -85,7 +85,7 @@ let create_client () =
   let recv_s, push = Lwt_stream.create () in
 
   let send_f port frame =
-    Protocol.frame_to_yojson frame
+    Protocol.raw_frame_to_yojson frame
     |> Yojson.Safe.to_string
     |> Chrome_api.Port.post_message_json port
   in

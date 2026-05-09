@@ -137,23 +137,7 @@ type json = Yojson.Safe.t [@@deriving yojson]
 type 'a frame = {
   correlation_id : int;
   payload : 'a;
-}
-
-let frame_to_yojson (frame : json frame) : Yojson.Safe.t =
-  `Assoc [("id", `Int frame.correlation_id); ("payload", frame.payload)]
-
-let frame_of_yojson : Yojson.Safe.t -> (json frame, string) Result.t = function
-  | `Assoc pairs ->
-    let correlation_id = match List.Assoc.find pairs ~equal:String.equal "id" with
-      | Some (`Int n) -> Ok n
-      | _ -> Error "frame: missing or invalid 'id'"
-    in
-    let payload = match List.Assoc.find pairs ~equal:String.equal "payload" with
-      | Some json -> json
-      | None -> `Null
-    in
-    Result.map correlation_id ~f:(fun correlation_id -> { correlation_id; payload })
-  | _ -> Error "frame: expected JSON object"
+}[@@deriving yojson]
 
 type request_payload = {
   command : string;
@@ -267,12 +251,12 @@ let make_notification_frame notification =
   { correlation_id = 0; payload = notification_to_yojson notification }
 
 (* -- Frame serialization *)
+type raw_frame = json frame [@@deriving yojson]
 
 let serialize_frame frame =
-  frame_to_yojson frame |> Yojson.Safe.to_string
+  raw_frame_to_yojson frame |> Yojson.Safe.to_string
 
 let deserialize_frame str =
   let ( let* ) r f = Result.bind r ~f in
   let* json = parse_json_string str in
-  frame_of_yojson json
-
+  raw_frame_of_yojson json
