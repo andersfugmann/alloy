@@ -36,11 +36,6 @@ let json_parse s : _ Js.t =
 let json_stringify (v : _ Js.t) =
   Js.to_string (Js._JSON##stringify v)
 
-let safe_stringify (v : _ Js.t) =
-  match Js.to_string (Js._JSON##stringify v) with
-  | s -> s
-  | exception _ -> "null"
-
 (* ── Console ─────────────────────────────────────────────────────── *)
 
 let log msg =
@@ -95,29 +90,6 @@ module Runtime = struct
     Js.to_string
       (call rt "getURL" [| inject (Js.string path) |] : Js.js_string Js.t)
 
-  class type runtime_error = object
-    method message : Js.js_string Js.t Js.readonly_prop
-  end
-
-  let last_error () =
-    match get_opt rt "lastError" with
-    | None -> None
-    | Some err ->
-      Some (Js.to_string (Js.Unsafe.coerce err : runtime_error Js.t)##.message)
-
-  let send_message msg_json ~on_response =
-    call rt "sendMessage"
-      [| inject (json_parse msg_json);
-         inject
-           (Js.wrap_callback (fun response ->
-              let err =
-                match last_error () with
-                | Some e -> e
-                | None -> ""
-              in
-              let resp_str = safe_stringify response in
-              on_response err resp_str)) |]
-
   let on_installed f =
     add_listener rt "onInstalled"
       (inject (Js.wrap_callback (fun _details -> f ())))
@@ -125,19 +97,6 @@ module Runtime = struct
   let on_startup f =
     add_listener rt "onStartup"
       (inject (Js.wrap_callback (fun _unit -> f ())))
-
-  let on_message f =
-    add_listener rt "onMessage"
-      (inject
-         (Js.wrap_callback (fun msg _sender send_response ->
-              let msg_str = json_stringify msg in
-              let respond s =
-                ignore
-                  (Js.Unsafe.fun_call send_response
-                     [| inject (json_parse s) |] : unit)
-              in
-              f msg_str respond;
-              Js._true)))
 
   let connect () : port =
     let p : _ Js.t = call rt "connect" [||] in

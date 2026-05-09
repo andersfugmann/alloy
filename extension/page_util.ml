@@ -5,36 +5,6 @@ open Js_of_ocaml
 let ( let* ) = Lwt.bind
 
 (* -- Chrome API wrappers -- *)
-
-let send_message msg ~on_response =
-  Chrome_api.Runtime.send_message
-    (Yojson.Safe.to_string msg)
-    ~on_response:(fun err resp_str ->
-      match String.is_empty err with
-      | false -> on_response (Error err)
-      | true ->
-        (match Yojson.Safe.from_string resp_str with
-         | json -> on_response (Ok json)
-         | exception _ -> on_response (Error "invalid JSON response")))
-
-let send_protocol_command : type req resp. (req, resp) Protocol.command -> req ->
-    on_response:((resp, string) Result.t -> unit) -> unit =
-  fun cmd params ~on_response ->
-    let frame = Protocol.make_request_frame cmd params 0 in
-    let msg = Protocol.frame_to_yojson frame in
-    send_message msg ~on_response:(fun result ->
-      match result with
-      | Error e -> on_response (Error e)
-      | Ok json ->
-        let parsed =
-          Result.bind (Protocol.frame_of_yojson json) ~f:(fun frame ->
-            match Protocol.parse_response_payload frame with
-            | Ok (Protocol.Success payload) -> Protocol.response_deserializer cmd payload
-            | Ok (Protocol.Failure msg) -> Error msg
-            | Error msg -> Error msg)
-        in
-        on_response parsed)
-
 let storage_get keys ~on_result =
   Chrome_api.Storage.get_local keys ~on_result
 
@@ -182,29 +152,15 @@ let create_option (doc : Dom_html.document Js.t) ~value ~text ~selected =
 
 (* -- Port-based Client connection for popup pages -- *)
 
-let connect_port ~name ~on_ready ~on_event =
-  Chrome_api.log "connect_port: calling chrome.runtime.connect()";
-  let port = Chrome_api.Runtime.connect () in
-  Chrome_api.log "connect_port: port created, setting up listeners";
-  let write msg = Chrome_api.Port.post_message_json port msg in
-  let (read, push_incoming) = Lwt_stream.create () in
-  Chrome_api.Port.on_message_json port (fun msg ->
-    Chrome_api.log (Printf.sprintf "connect_port: incoming message: %s"
-      (String.prefix msg 200));
-    push_incoming (Some msg));
-  Chrome_api.Port.on_disconnect port (fun () ->
-    Chrome_api.log "connect_port: port disconnected";
-    push_incoming None);
+let connect_port ~on_ready ~on_event =
   Lwt.async (fun () ->
-    Chrome_api.log "connect_port: starting Client.init";
     Lwt.catch
       (fun () ->
-        let* (conn, events) = Client.init ~write ~read ~name () in
-        Chrome_api.log "connect_port: Client.init complete, connected";
+        let* (conn, push_stream) = Multiplexer.create_client () in
         on_ready conn;
         let rec forward () =
-          let* ev = Lwt_stream.next events in
-          on_event ev;
+          let* p = Lwt_stream.next push_stream in
+          on_event p;
           forward ()
         in
         Lwt.catch forward (fun _exn -> Lwt.return_unit))

@@ -2,10 +2,27 @@ open! Base
 open! Stdio
 open Js_of_ocaml
 
+let ( let* ) = Lwt.bind
+
 let rec swap_nth n = function
   | a :: b :: rest when n = 0 -> b :: a :: rest
   | x :: rest -> x :: swap_nth (n - 1) rest
   | l -> l
+
+(* -- Connection -- *)
+
+let conn_ref : Client.t option ref = ref None
+
+let send_command : type req resp. (req, resp) Protocol.command -> req ->
+    on_response:((resp, string) Result.t -> unit) -> unit =
+  fun cmd params ~on_response ->
+    match !conn_ref with
+    | None -> on_response (Error "not connected")
+    | Some conn ->
+      Lwt.async (fun () ->
+        let* result = Client.call conn cmd params in
+        on_response result;
+        Lwt.return_unit)
 
 (* -- Mutable state (required for async UI callbacks) -- *)
 
@@ -267,7 +284,7 @@ and reset_tenant_form () =
 (* -- Rule CRUD -- *)
 
 and fetch_and_render_rules () =
-  Page_util.send_protocol_command Get_rules ()
+  send_command Get_rules ()
     ~on_response:(fun result ->
       match result with
       | Ok r -> render_rules r
@@ -275,7 +292,7 @@ and fetch_and_render_rules () =
         show_msg (Printf.sprintf "Failed to load rules: %s" msg) "error")
 
 and send_and_refetch_rules updated =
-  Page_util.send_protocol_command Set_rules updated
+  send_command Set_rules updated
     ~on_response:(fun result ->
       match result with
       | Ok () -> fetch_and_render_rules ()
@@ -382,7 +399,7 @@ and save_rule () =
           show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
         | Ok () ->
           let rule : Protocol.rule = { pattern; target; enabled = true } in
-          Page_util.send_protocol_command Get_rules ()
+          send_command Get_rules ()
             ~on_response:(fun result ->
               match result with
               | Ok current ->
@@ -444,7 +461,7 @@ let read_defaults () =
 let save_config () =
   read_defaults ();
   show_msg "Saving\u{2026}" "";
-  Page_util.send_protocol_command Set_config !config
+  send_command Set_config !config
     ~on_response:(fun result ->
       match result with
       | Ok () -> show_msg "Configuration saved." "success"
@@ -474,7 +491,7 @@ let fetch_config () =
          render_defaults ())
   in
 
-  Page_util.send_protocol_command Get_config ()
+  send_command Get_config ()
     ~on_response:(fun result ->
       (match result with
        | Ok cfg ->
@@ -485,7 +502,7 @@ let fetch_config () =
       pending := !pending - 1;
       finish_init ());
 
-  Page_util.send_protocol_command Get_rules ()
+  send_command Get_rules ()
     ~on_response:(fun result ->
       (match result with
        | Ok r ->
@@ -495,7 +512,7 @@ let fetch_config () =
       pending := !pending - 1;
       finish_init ());
 
-  Page_util.send_protocol_command Status ()
+  send_command Status ()
     ~on_response:(fun result ->
       (match result with
        | Ok info ->
@@ -528,4 +545,9 @@ let () =
 
 (* -- Init -- *)
 
-let () = fetch_config ()
+let () =
+  Page_util.connect_port
+    ~on_ready:(fun conn ->
+      conn_ref := Some conn;
+      fetch_config ())
+    ~on_event:(fun _p -> ())

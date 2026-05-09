@@ -30,7 +30,7 @@ let () =
 (* -- Entry point -- *)
 
 let () =
-  Page_util.connect_port ~name:"add_rule"
+  Page_util.connect_port
     ~on_ready:(fun conn ->
       (* Fetch tenants from config *)
       Lwt.async (fun () ->
@@ -108,4 +108,4 @@ let () =
                     (Printf.sprintf "Error fetching rules: %s" msg);
                   Lwt.return_unit
                 end)))
-    ~on_event:(fun _ev -> ())
+    ~on_event:(fun _p -> ())

@@ -136,7 +136,7 @@ let load_tenants conn =
       let self_id =
         match info_result with
         | Ok info -> info.Protocol.tenant_id
-        | Error _ -> Client.tenant_name conn
+        | Error _ -> Client.name conn
       in
       begin match (status_result, config_result) with
       | (Ok status, Ok cfg) ->
@@ -159,7 +159,7 @@ let load_tenants conn =
 
 let () =
   Chrome_api.log "Popup script starting";
-  Page_util.connect_port ~name:"popup"
+  Page_util.connect_port
     ~on_ready:(fun conn ->
       load_tenants conn;
 
@@ -179,37 +179,31 @@ let () =
       (* Delete matching rule button *)
       Page_util.on_click btn_delete_rule (fun () ->
         Page_util.query_active_tab ~on_result:(fun url _tab_id ->
-          Page_util.send_message
-            (`Assoc [ ("action", `String "delete_matching_rule");
-                      ("url", `String url) ])
-            ~on_response:(fun result ->
-              match result with
-              | Ok json ->
-                begin match Yojson.Safe.Util.member "ok" json with
-                | `Bool true -> set_footer ~cls:"success" "Rule deleted"
-                | _ ->
-                  let msg = Yojson.Safe.Util.member "error" json in
-                  begin match msg with
-                  | `String s -> set_footer ~cls:"error" s
-                  | _ -> set_footer ~cls:"error" "Unknown error"
-                  end
-                end
-              | Error msg -> set_footer ~cls:"error" msg)));
+          Lwt.async (fun () ->
+            let* result = Client.call conn Test { url; title = None } in
+            match result with
+            | Ok (Protocol.Match { rule_index; _ }) ->
+              let* rules_result = Client.call conn Get_rules () in
+              (match rules_result with
+               | Ok existing ->
+                 let updated = List.filteri existing ~f:(fun i _ -> not (Int.equal i rule_index)) in
+                 let* set_result = Client.call conn Set_rules updated in
+                 (match set_result with
+                  | Ok () -> set_footer ~cls:"success" "Rule deleted"
+                  | Error msg -> set_footer ~cls:"error" msg);
+                 Lwt.return_unit
+               | Error msg ->
+                 set_footer ~cls:"error" msg;
+                 Lwt.return_unit)
+            | Ok (No_match _) ->
+              set_footer ~cls:"error" "No matching rule";
+              Lwt.return_unit
+            | Error msg ->
+              set_footer ~cls:"error" msg;
+              Lwt.return_unit)));
 
       (* Configure button *)
       Page_util.on_click (Page_util.get_by_id "btnConfig") (fun () ->
         Page_util.create_tab (Page_util.get_extension_url "config.html");
-        Dom_html.window##close);
-
-      (* Reconnect button *)
-      Page_util.on_click (Page_util.get_by_id "btnReconnect") (fun () ->
-        Page_util.send_message
-          (`Assoc [ ("action", `String "reconnect") ])
-          ~on_response:(fun result ->
-            match result with
-            | Error _ -> set_status false "Error reconnecting"
-            | Ok json ->
-              match Yojson.Safe.Util.member "connected" json with
-              | `Bool true -> set_status true "Reconnected"
-              | _ -> set_status false "Disconnected")))
-    ~on_event:(fun _ev -> ())
+        Dom_html.window##close))
+    ~on_event:(fun _p -> ())

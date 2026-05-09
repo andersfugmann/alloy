@@ -16,10 +16,8 @@ end
 module Runtime : sig
   val connect_native : string -> port
   val get_url : string -> string
-  val send_message : string -> on_response:(string -> string -> unit) -> unit
   val on_installed : (unit -> unit) -> unit
   val on_startup : (unit -> unit) -> unit
-  val on_message : (string -> (string -> unit) -> unit) -> unit
   val connect : unit -> port
   val on_connect : (port -> unit) -> unit
 end
