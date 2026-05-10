@@ -72,12 +72,12 @@ let rt : _ Js.t = get chrome "runtime"
 (* ── Port operations ─────────────────────────────────────────────── *)
 
 module Port = struct
-  let post_message_json (p : port) json_str =
-    call p "postMessage" [| inject (json_parse json_str) |]
+  let post_message (p : port) json =
+    call p "postMessage" [| inject (Yojson.Safe.to_string json |> json_parse) |]
 
-  let on_message_json (p : port) f =
+  let on_message (p : port) f =
     add_listener p "onMessage"
-      (inject (Js.wrap_callback (fun msg -> f (json_stringify msg))))
+      (inject (Js.wrap_callback (fun msg -> json_stringify msg |> Yojson.Safe.from_string |> f)))
 
   let on_disconnect (p : port) f =
     add_listener p "onDisconnect"

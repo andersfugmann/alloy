@@ -8,8 +8,8 @@ val set_timeout : (unit -> unit) -> int -> unit
 val performance_now : unit -> float
 
 module Port : sig
-  val post_message_json : port -> string -> unit
-  val on_message_json : port -> (string -> unit) -> unit
+  val post_message : port -> Yojson.Safe.t -> unit
+  val on_message : port -> (Yojson.Safe.t -> unit) -> unit
   val on_disconnect : port -> (unit -> unit) -> unit
   val disconnect : port -> unit
   val connect : unit -> port

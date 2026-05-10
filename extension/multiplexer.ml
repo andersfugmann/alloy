@@ -27,8 +27,7 @@ let handle_broadcast port close_var push =
   | Some push ->
     Protocol.make_push_frame push
     |> Protocol.raw_frame_to_yojson
-    |> Yojson.Safe.to_string
-    |> Chrome_api.Port.post_message_json port
+    |> Chrome_api.Port.post_message port
   | None -> close close_var
 
 let handle_response_payload port close_var correlation_id payload =
@@ -41,20 +40,17 @@ let handle_response_payload port close_var correlation_id payload =
   in
   Protocol.{ correlation_id; payload }
   |> Protocol.raw_frame_to_yojson
-  |> Yojson.Safe.to_string
-  |> Chrome_api.Port.post_message_json port
+  |> Chrome_api.Port.post_message port
 
-let handle_receive client port close_var json_str =
+let handle_receive client port close_var json =
   let frame =
-    Yojson.Safe.from_string json_str
-    |> Protocol.raw_frame_of_yojson
+    Protocol.raw_frame_of_yojson json
     |> Result.ok_or_failwith (* This is intended: Crash on broken invariant *)
   in
   Client.proxy client frame.payload (handle_response_payload port close_var frame.correlation_id)
 
-let handle_message push json_string =
-  Yojson.Safe.from_string json_string
-  |> Protocol.raw_frame_of_yojson
+let handle_message push json =
+  Protocol.raw_frame_of_yojson json
   |> (function
       | Ok json -> Some json
       | Error s ->
@@ -69,7 +65,7 @@ let handle_disconnect close_var () =
 let handle_connect client port =
   let close_var = Lwt_mvar.create_empty () in
   Client.register_broadcast client (handle_broadcast port close_var);
-  Chrome_api.Port.on_message_json port (handle_receive client port close_var);
+  Chrome_api.Port.on_message port (handle_receive client port close_var);
   Chrome_api.Port.on_disconnect port (handle_disconnect close_var);
   Lwt.async (fun () ->
       let* () = Client.closed client in
@@ -116,9 +112,8 @@ let create_client () =
 
   let send_f port frame =
     Protocol.raw_frame_to_yojson frame
-    |> Yojson.Safe.to_string
-    |> Chrome_api.Port.post_message_json port
+    |> Chrome_api.Port.post_message port
   in
-  Chrome_api.Port.on_message_json port (handle_message push);
+  Chrome_api.Port.on_message port (handle_message push);
   let send_f = send_f port in
   Client.init ~recv_s ~send_f ()

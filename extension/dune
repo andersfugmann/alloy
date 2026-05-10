@@ -1,7 +1,7 @@
 (library
  (name chrome_api)
  (modules chrome_api)
- (libraries js_of_ocaml base stdio)
+ (libraries js_of_ocaml yojson base stdio)
  (preprocess
   (pps js_of_ocaml-ppx)))
 
