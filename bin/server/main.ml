@@ -93,15 +93,33 @@ let default_config () : Protocol.config =
   }
 
 let default_exclude_patterns = [
-  "^https?://www\\.google\\..*/search";
-  "^https?://www\\.bing\\.com/search";
-  "^https?://search\\.yahoo\\.com/search";
-  "^https?://duckduckgo\\.com/";
-  "^https?://www\\.baidu\\.com/s";
-  "^https?://yandex\\..*/search";
-  "^https?://search\\.brave\\.com/search";
-  "^https?://www\\.ecosia\\.org/search";
-  "^https?://www\\.startpage\\.com/";
+  "^https?://www[.]google[.].*/(search|maps)";
+  "^https?://www[.]bing[.]com/search";
+  "^https?://search[.]yahoo[.]com/search";
+  "^https?://duckduckgo[.]com/";
+  "^https?://www[.]baidu[.]com/s";
+  "^https?://yandex[.].*/(search|yandsearch)";
+  "^https?://search[.]brave[.]com/search";
+  "^https?://www[.]ecosia[.]org/search";
+  "^https?://www[.]startpage[.]com/";
+  "^https?://www[.]qwant[.]com/";
+  "^https?://metager[.]org/meta/";
+  "^https?://swisscows[.]com/web";
+  "^https?://www[.]mojeek[.]com/search";
+  "^https?://(www[.])?naver[.]com/search";
+  "^https?://search[.]naver[.]com/";
+  "^https?://(www[.])?seznam[.]cz/";
+  "^https?://search[.]daum[.]net/";
+  "^https?://www[.]sogou[.]com/";
+  "^https?://www[.]so[.]com/s";
+  "^https?://search[.]yahoo[.]co[.]jp/search";
+  "^https?://www[.]perplexity[.]ai/search";
+  "^https?://you[.]com/search";
+  "^https?://kagi[.]com/search";
+  "^https?://www[.]dogpile[.]com/";
+  "^https?://presearch[.]com/search";
+  "^https?://translate[.]google[.]";
+  "^https?://searx[.]";
 ]
 
 (* -- Config loading / saving *)
