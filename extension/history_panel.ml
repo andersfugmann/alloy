@@ -26,6 +26,16 @@ let sort_results sort_mode results =
       Int.compare (List.length b.entry.visits) (List.length a.entry.visits))
   | _ -> results
 
+let today () =
+  let ms = Js.float_of_number (new%js Js.date_now)##getTime in
+  Float.to_int (ms /. 86400000.)
+
+let days_ago_text days =
+  match days with
+  | 0 -> "today"
+  | 1 -> "yesterday"
+  | n -> Printf.sprintf "%d days ago" n
+
 let render_results results =
   Page_util.set_html results_list "";
   let doc = Dom_html.document in
@@ -52,6 +62,18 @@ let render_results results =
       Page_util.set_class (url_div :> Dom_html.element Js.t) "result-url";
       Page_util.set_text (url_div :> Dom_html.element Js.t) entry.url;
       Dom.appendChild li url_div;
+      let meta_div = Dom_html.createDiv doc in
+      Page_util.set_class (meta_div :> Dom_html.element Js.t) "result-meta";
+      let last_visit =
+        match List.hd entry.visits with
+        | Some day -> days_ago_text (today () - day)
+        | None -> "no visits"
+      in
+      let visit_count = List.length entry.visits in
+      Page_util.set_text (meta_div :> Dom_html.element Js.t)
+        (Printf.sprintf "%s · %d visit%s" last_visit visit_count
+          (match visit_count with 1 -> "" | _ -> "s"));
+      Dom.appendChild li meta_div;
       Page_util.on_click (li :> Dom_html.element Js.t) (fun () ->
         Chrome_api.Tabs.create_url entry.url);
       Dom.appendChild results_list li);
