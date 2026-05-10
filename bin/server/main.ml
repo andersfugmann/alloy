@@ -93,6 +93,7 @@ let default_config () : Protocol.config =
   }
 
 let default_exclude_patterns = [
+  (* Major global search engines *)
   "^https?://www\\.google\\..*/search";
   "^https?://www\\.bing\\.com/search";
   "^https?://search\\.yahoo\\.com/search";
@@ -102,6 +103,35 @@ let default_exclude_patterns = [
   "^https?://search\\.brave\\.com/search";
   "^https?://www\\.ecosia\\.org/search";
   "^https?://www\\.startpage\\.com/";
+  (* Privacy-focused *)
+  "^https?://www\\.qwant\\.com/";
+  "^https?://metager\\.org/meta/";
+  "^https?://swisscows\\.com/web";
+  "^https?://www\\.mojeek\\.com/search";
+  "^https?://lite\\.qwant\\.com/";
+  "^https?://searx\\..*";
+  "^https?://searxng\\..*";
+  (* Regional *)
+  "^https?://www\\.naver\\.com/search";
+  "^https?://search\\.naver\\.com/";
+  "^https?://www\\.seznam\\.cz/";
+  "^https?://search\\.seznam\\.cz/";
+  "^https?://search\\.daum\\.net/";
+  "^https?://www\\.sogou\\.com/";
+  "^https?://www\\.so\\.com/s";
+  "^https?://search\\.yahoo\\.co\\.jp/search";
+  "^https?://petal-search\\.com/";
+  (* AI / conversational *)
+  "^https?://www\\.perplexity\\.ai/search";
+  "^https?://you\\.com/search";
+  "^https?://kagi\\.com/search";
+  (* Meta search *)
+  "^https?://www\\.dogpile\\.com/";
+  "^https?://www\\.metacrawler\\.com/";
+  "^https?://presearch\\.com/search";
+  (* Google services (not regular pages) *)
+  "^https?://www\\.google\\..*/maps";
+  "^https?://translate\\.google\\..*";
 ]
 
 (* -- Config loading / saving *)
