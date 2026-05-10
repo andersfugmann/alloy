@@ -131,6 +131,26 @@
       color: #5f6368;
       text-align: center;
     }
+    .context-menu {
+      display: none;
+      position: fixed;
+      background: #fff;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+      padding: 4px 0;
+      z-index: 1000;
+      min-width: 160px;
+    }
+    .context-menu-item {
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      color: #202124;
+    }
+    .context-menu-item:hover {
+      background: #f1f3f4;
+    }
   </style>
 </head>
 <body>
@@ -154,6 +174,9 @@
   </div>
   <input type="text" id="searchInput" class="search-box" placeholder="Search history…" autofocus>
   <ul class="results" id="resultsList"></ul>
+  <div id="contextMenu" class="context-menu">
+    <div id="ctxRemove" class="context-menu-item">Remove from history</div>
+  </div>
   <div id="status"></div>
   <script src="history_panel.js"></script>
 </body>

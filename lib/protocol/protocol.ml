@@ -143,6 +143,7 @@ type (_, _) command =
   | Page_loaded : (page_loaded_request, unit) command
   | Lookup : (lookup_request, lookup_result list) command
   | Import_history : (history_entry list, int) command
+  | Delete_history : (string list, int) command
 
 let parse_json_string s =
   match Yojson.Safe.from_string s with
@@ -212,6 +213,7 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Page_loaded -> "page_loaded"
   | Lookup -> "lookup"
   | Import_history -> "import_history"
+  | Delete_history -> "delete_history"
 
 let command_codec : type req resp. (req, resp) command ->
   ((req -> Yojson.Safe.t) * (Yojson.Safe.t -> (resp, string) Result.t)) *
@@ -271,6 +273,24 @@ let command_codec : type req resp. (req, resp) command ->
     in
     ((entries_to_yojson, int_of_yojson),
      (entries_of_yojson, (fun n -> `Int n)))
+  | Delete_history ->
+    let urls_to_yojson urls =
+      `List (List.map urls ~f:(fun s -> `String s))
+    in
+    let urls_of_yojson = function
+      | `List items ->
+        List.map items ~f:(function
+          | `String s -> Ok s
+          | _ -> Error "delete_history: expected string")
+        |> Result.all
+      | _ -> Error "delete_history: expected list"
+    in
+    let int_of_yojson = function
+      | `Int n -> Ok n
+      | _ -> Error "delete_history: expected int"
+    in
+    ((urls_to_yojson, int_of_yojson),
+     (urls_of_yojson, (fun n -> `Int n)))
 
 let request_serializer cmd = fst (fst (command_codec cmd))
 let response_deserializer cmd = snd (fst (command_codec cmd))

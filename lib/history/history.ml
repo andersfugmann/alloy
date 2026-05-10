@@ -66,6 +66,11 @@ let merge existing imported =
   in
   Map.data merged
 
+let delete entries ~urls =
+  let url_set = Set.of_list (module String) urls in
+  List.filter entries ~f:(fun entry ->
+    not (Set.mem url_set entry.Protocol.url))
+
 let lookup entries ~query ~(scope : Protocol.search_scope) ~max_results ~max_age_days ~today =
   let terms =
     query
@@ -288,3 +293,41 @@ let%expect_test "lookup: multi-word query" =
   [%expect {|
     https://github.com/ocaml | OCaml on GitHub | matches: 2 | visits: [10]
     https://github.com/rust | Rust on GitHub | matches: 1 | visits: [10] |}]
+
+let%expect_test "delete: removes matching urls" =
+  let entries = [
+    { Protocol.url = "https://a.com"; title = "A"; visits = [3; 1] };
+    { Protocol.url = "https://b.com"; title = "B"; visits = [2] };
+    { Protocol.url = "https://c.com"; title = "C"; visits = [1] };
+  ] in
+  let result = delete entries ~urls:["https://b.com"] in
+  print_entries result;
+  [%expect {|
+    https://a.com | A | visits: [3, 1]
+    https://c.com | C | visits: [1] |}]
+
+let%expect_test "delete: removes multiple urls" =
+  let entries = [
+    { Protocol.url = "https://a.com"; title = "A"; visits = [3] };
+    { Protocol.url = "https://b.com"; title = "B"; visits = [2] };
+    { Protocol.url = "https://c.com"; title = "C"; visits = [1] };
+  ] in
+  let result = delete entries ~urls:["https://a.com"; "https://c.com"] in
+  print_entries result;
+  [%expect {| https://b.com | B | visits: [2] |}]
+
+let%expect_test "delete: non-existent url is no-op" =
+  let entries = [
+    { Protocol.url = "https://a.com"; title = "A"; visits = [1] };
+  ] in
+  let result = delete entries ~urls:["https://z.com"] in
+  print_entries result;
+  [%expect {| https://a.com | A | visits: [1] |}]
+
+let%expect_test "delete: empty url list is no-op" =
+  let entries = [
+    { Protocol.url = "https://a.com"; title = "A"; visits = [1] };
+  ] in
+  let result = delete entries ~urls:[] in
+  print_entries result;
+  [%expect {| https://a.com | A | visits: [1] |}]

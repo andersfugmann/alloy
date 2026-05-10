@@ -14,6 +14,20 @@ let max_age_select = Page_util.select_by_id "maxAge"
 
 let search_gen = ref 0
 let cached_results : Protocol.lookup_result list ref = ref []
+let context_menu = Page_util.get_by_id "contextMenu"
+let ctx_remove = Page_util.get_by_id "ctxRemove"
+let pending_delete_urls : string list ref = ref []
+let active_conn : Client.t option ref = ref None
+
+let hide_context_menu () =
+  Page_util.set_display context_menu "none";
+  pending_delete_urls := []
+
+let show_context_menu ~x ~y ~urls =
+  pending_delete_urls := urls;
+  context_menu##.style##.left := Js.string (Printf.sprintf "%dpx" x);
+  context_menu##.style##.top := Js.string (Printf.sprintf "%dpx" y);
+  Page_util.set_display context_menu "block"
 
 let sort_results sort_mode results =
   match sort_mode with
@@ -91,6 +105,7 @@ let visit_meta_text visits =
 
 let render_results results =
   Page_util.set_html results_list "";
+  hide_context_menu ();
   let doc = Dom_html.document in
   let sort_mode = Js.to_string sort_select##.value in
   let sorted = sort_results sort_mode results in
@@ -101,6 +116,18 @@ let render_results results =
   | _ ->
     let groups = group_results sorted in
     let total_results = List.length sorted in
+    let on_context_menu (el : Dom_html.element Js.t) urls =
+      ignore (Dom_html.addEventListener el
+        (Dom_html.Event.make "contextmenu")
+        (Dom_html.handler (fun ev ->
+          Dom.preventDefault ev;
+          show_context_menu
+            ~x:ev##.clientX
+            ~y:ev##.clientY
+            ~urls;
+          Js._false))
+        Js._false)
+    in
     let render_single (entry : Protocol.history_entry) =
       let li = Dom_html.createLi doc in
       let title_div = Dom_html.createDiv doc in
@@ -123,6 +150,7 @@ let render_results results =
       Dom.appendChild li meta_div;
       Page_util.on_click (li :> Dom_html.element Js.t) (fun () ->
         Chrome_api.Tabs.create_url entry.url);
+      on_context_menu (li :> Dom_html.element Js.t) [entry.url];
       li
     in
     let render_group results =
@@ -198,6 +226,8 @@ let render_results results =
         | false ->
           Page_util.set_display (children_ul :> Dom_html.element Js.t) "none";
           Page_util.set_text (toggle :> Dom_html.element Js.t) "▸");
+      let all_urls = List.map results ~f:(fun (r : Protocol.lookup_result) -> r.entry.url) in
+      on_context_menu (li :> Dom_html.element Js.t) all_urls;
       li
     in
     List.iter groups ~f:(fun (_, group) ->
@@ -269,10 +299,35 @@ let schedule_search conn =
       | false -> ())
     300
 
+let delete_urls conn urls =
+  let url_set = Set.of_list (module String) urls in
+  Lwt.async (fun () ->
+    let* _result = Client.call conn Delete_history urls in
+    cached_results :=
+      List.filter !cached_results ~f:(fun (r : Protocol.lookup_result) ->
+        not (Set.mem url_set r.entry.url));
+    render_results !cached_results;
+    Lwt.return_unit)
+
 let () =
   Chrome_api.log "History panel starting";
+  Dom_html.document##.onclick :=
+    Dom_html.handler (fun _ev -> hide_context_menu (); Js._true);
+  ignore (Dom_html.addEventListener Dom_html.document
+    (Dom_html.Event.make "keydown")
+    (Dom_html.handler (fun (ev : Dom_html.keyboardEvent Js.t) ->
+      let key = Js.Optdef.case ev##.key (fun () -> "") Js.to_string in
+      match key with
+      | "Escape" -> hide_context_menu (); Js._true
+      | _ -> Js._true))
+    Js._false);
   Page_util.connect_port
     ~on_ready:(fun conn ->
+      active_conn := Some conn;
+      Page_util.on_click ctx_remove (fun () ->
+        let urls = !pending_delete_urls in
+        hide_context_menu ();
+        delete_urls conn urls);
       search_input##.oninput :=
         Dom_html.handler (fun _ev ->
           schedule_search conn;

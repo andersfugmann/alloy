@@ -493,6 +493,12 @@ let handle_import_history entries env ~respond =
   respond (Ok (List.length history));
   { env.state with history }
 
+let handle_delete_history urls env ~respond =
+  let history = History.delete env.state.history ~urls in
+  History.save env.state.history_path history;
+  respond (Ok (List.length history));
+  { env.state with history }
+
 (* -- Command lookup: single match on string → handler bundle *)
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
@@ -509,6 +515,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = handle_connection_info })
   | "lookup" -> Ok (Handler { cmd = Lookup; handle = handle_lookup })
   | "import_history" -> Ok (Handler { cmd = Import_history; handle = handle_import_history })
+  | "delete_history" -> Ok (Handler { cmd = Delete_history; handle = handle_delete_history })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)
