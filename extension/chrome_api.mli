@@ -88,6 +88,7 @@ module History : sig
   val search :
     max_results:int ->
     f:(url:string -> title:string -> last_visit_time:float -> unit) ->
+    on_done:(unit -> unit) ->
     unit
   val get_visits : string -> f:(float list -> unit) -> unit
 end

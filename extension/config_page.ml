@@ -54,6 +54,8 @@ let tenant_list_el = Page_util.get_by_id "tenantList"
 let rule_list_el = Page_util.get_by_id "ruleList"
 let tenant_form_el = Page_util.get_by_id "tenantForm"
 let rule_form_el = Page_util.get_by_id "ruleForm"
+let import_btn = Page_util.get_by_id "btnImportHistory"
+let import_msg = Page_util.get_by_id "importMsg"
 
 (* -- Helpers -- *)
 
@@ -523,6 +525,55 @@ let fetch_config () =
       pending := !pending - 1;
       finish_init ())
 
+(* -- History import -- *)
+
+let import_history () =
+  Page_util.set_disabled import_btn true;
+  Page_util.set_text import_msg "Collecting browser history…";
+  Page_util.set_class import_msg "msg";
+  let entries = ref [] in
+  let pending = ref 0 in
+  let search_done = ref false in
+  let finish_if_ready () =
+    match !search_done && !pending = 0 with
+    | false -> ()
+    | true ->
+      let entry_list = !entries in
+      Page_util.set_text import_msg
+        (Printf.sprintf "Importing %d entries…" (List.length entry_list));
+      send_command Import_history entry_list
+        ~on_response:(fun result ->
+          Page_util.set_disabled import_btn false;
+          match result with
+          | Ok count ->
+            Page_util.set_text import_msg
+              (Printf.sprintf "Imported %d entries." count);
+            Page_util.set_class import_msg "msg success"
+          | Error msg ->
+            Page_util.set_text import_msg
+              (Printf.sprintf "Error: %s" msg);
+            Page_util.set_class import_msg "msg error")
+  in
+  Chrome_api.History.search ~max_results:100000
+    ~f:(fun ~url ~title ~last_visit_time:_ ->
+      match Page_util.is_internal_url url || String.is_empty url with
+      | true -> ()
+      | false ->
+        pending := !pending + 1;
+        Chrome_api.History.get_visits url ~f:(fun timestamps ->
+          let visits =
+            List.map timestamps ~f:(fun ms -> Float.to_int (ms /. 86400000.))
+            |> Set.of_list (module Int)
+            |> Set.to_list
+            |> List.sort ~compare:(fun a b -> Int.compare b a)
+          in
+          entries := Protocol.{ url; title; visits } :: !entries;
+          pending := !pending - 1;
+          finish_if_ready ()))
+    ~on_done:(fun () ->
+      search_done := true;
+      finish_if_ready ())
+
 (* -- Event bindings -- *)
 
 let () =
@@ -542,7 +593,9 @@ let () =
   Page_util.on_click (Page_util.get_by_id "rfSave") (fun () ->
     save_rule ());
   Page_util.on_click (Page_util.get_by_id "btnSave") (fun () ->
-    save_config ())
+    save_config ());
+  Page_util.on_click import_btn (fun () ->
+    import_history ())
 
 (* -- Init -- *)
 

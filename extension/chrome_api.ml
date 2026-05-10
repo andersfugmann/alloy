@@ -439,7 +439,7 @@ module History = struct
     method visitTime : Js.number Js.t Js.Optdef.t Js.readonly_prop
   end
 
-  let search ~max_results ~f =
+  let search ~max_results ~f ~on_done =
     let query = js_obj [
       ("text", inject (Js.string ""));
       ("maxResults", inject max_results);
@@ -457,7 +457,8 @@ module History = struct
               Js.Optdef.case item##.lastVisitTime (fun () -> 0.0) Js.float_of_number
             in
             f ~url ~title ~last_visit_time))
-      |> (ignore : unit list -> unit))
+      |> (ignore : unit list -> unit);
+      on_done ())
     in
     call (history ()) "search" [| inject query; inject cb |]
 
