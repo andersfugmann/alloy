@@ -11,7 +11,7 @@ let non_empty s =
   | false -> Some s
 
 let make_client ?name ?brand ~host ~port ~debug () =
-  let native_port = Chrome_api.Runtime.connect_native "alloy" in
+  let native_port = Chrome_api.Port.Native.connect "alloy" in
   log "Connected to native messaging host";
   let (read_stream, push_incoming) = Lwt_stream.create () in
   Chrome_api.Port.on_message_json native_port (fun msg ->

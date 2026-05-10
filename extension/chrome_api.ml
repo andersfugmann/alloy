@@ -5,6 +5,8 @@ open! Base
 open! Stdio
 open Js_of_ocaml
 
+(* TODO: Cleanup unused functions *)
+
 (* ── Internal unsafe primitives ──────────────────────────────────── *)
 
 let global : _ Js.t = Js.Unsafe.global
@@ -60,7 +62,12 @@ let set_timeout f ms =
 
 (* ── Opaque port type ────────────────────────────────────────────── *)
 
+(* TODO: Move this into the port module *)
 type port = < > Js.t
+
+(* ── Shared runtime handle ────────────────────────────────────────── *)
+
+let rt : _ Js.t = get chrome "runtime"
 
 (* ── Port operations ─────────────────────────────────────────────── *)
 
@@ -75,17 +82,29 @@ module Port = struct
   let on_disconnect (p : port) f =
     add_listener p "onDisconnect"
       (inject (Js.wrap_callback (fun _port -> f ())))
+
+  let disconnect (p : port) =
+    call p "disconnect" [||]
+
+  let connect () : port =
+    let p : _ Js.t = call rt "connect" [||] in
+    Js.Unsafe.coerce p
+
+  let on_connect f =
+    add_listener rt "onConnect"
+      (inject (Js.wrap_callback (fun (p : _ Js.t) ->
+        f (Js.Unsafe.coerce p : port))))
+
+  module Native = struct
+    let connect app : port =
+      let p : _ Js.t = call rt "connectNative" [| inject (Js.string app) |] in
+      Js.Unsafe.coerce p
+  end
 end
 
 (* ── Runtime ─────────────────────────────────────────────────────── *)
 
 module Runtime = struct
-  let rt : _ Js.t = get chrome "runtime"
-
-  let connect_native app : port =
-    let p : _ Js.t = call rt "connectNative" [| inject (Js.string app) |] in
-    Js.Unsafe.coerce p
-
   let get_url path =
     Js.to_string
       (call rt "getURL" [| inject (Js.string path) |] : Js.js_string Js.t)
@@ -97,15 +116,6 @@ module Runtime = struct
   let on_startup f =
     add_listener rt "onStartup"
       (inject (Js.wrap_callback (fun _unit -> f ())))
-
-  let connect () : port =
-    let p : _ Js.t = call rt "connect" [||] in
-    Js.Unsafe.coerce p
-
-  let on_connect f =
-    add_listener rt "onConnect"
-      (inject (Js.wrap_callback (fun (p : _ Js.t) ->
-        f (Js.Unsafe.coerce p : port))))
 end
 
 (* ── Tabs ────────────────────────────────────────────────────────── *)
@@ -289,6 +299,43 @@ module Web_navigation = struct
       (inject
          (Js.wrap_callback (fun (details : nav_details Js.t) ->
               f (Js.to_string details##.url) details##.tabId details##.frameId)))
+
+  let on_completed f =
+    add_listener (nav ()) "onCompleted"
+      (inject
+         (Js.wrap_callback (fun (details : nav_details Js.t) ->
+              f (Js.to_string details##.url) details##.tabId details##.frameId)))
+end
+
+(* ── Web Request ─────────────────────────────────────────────────── *)
+
+module Web_request = struct
+  let req () : _ Js.t = get chrome "webRequest"
+
+  class type request_details = object
+    method url : Js.js_string Js.t Js.readonly_prop
+    method tabId : int Js.readonly_prop
+    method statusCode : int Js.readonly_prop
+  end
+
+  let on_completed f =
+    let filter = js_obj [ ("urls", inject (Js.array [| Js.string "http://*/*"; Js.string "https://*/*" |]));
+                          ("types", inject (Js.array [| Js.string "main_frame" |])) ] in
+    call (get (req ()) "onCompleted") "addListener"
+      [| inject (Js.wrap_callback (fun (details : request_details Js.t) ->
+             f (Js.to_string details##.url) details##.tabId details##.statusCode));
+         inject filter |]
+end
+
+(* ── Side Panel ──────────────────────────────────────────────────── *)
+
+module Side_panel = struct
+  let side_panel () : _ Js.t = get chrome "sidePanel"
+
+  let set_options ~path =
+    call (side_panel ()) "setOptions"
+      [| inject (js_obj [ ("path", inject (Js.string path));
+                          ("enabled", inject Js._true) ]) |]
 end
 
 (* ── Navigator (browser brand detection) ─────────────────────────── *)

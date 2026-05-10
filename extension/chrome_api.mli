@@ -11,15 +11,19 @@ module Port : sig
   val post_message_json : port -> string -> unit
   val on_message_json : port -> (string -> unit) -> unit
   val on_disconnect : port -> (unit -> unit) -> unit
+  val disconnect : port -> unit
+  val connect : unit -> port
+  val on_connect : (port -> unit) -> unit
+
+  module Native : sig
+    val connect : string -> port
+  end
 end
 
 module Runtime : sig
-  val connect_native : string -> port
   val get_url : string -> string
   val on_installed : (unit -> unit) -> unit
   val on_startup : (unit -> unit) -> unit
-  val connect : unit -> port
-  val on_connect : (port -> unit) -> unit
 end
 
 module Tabs : sig
@@ -60,6 +64,15 @@ end
 
 module Web_navigation : sig
   val on_before_navigate : (string -> int -> int -> unit) -> unit
+  val on_completed : (string -> int -> int -> unit) -> unit
+end
+
+module Web_request : sig
+  val on_completed : (string -> int -> int -> unit) -> unit
+end
+
+module Side_panel : sig
+  val set_options : path:string -> unit
 end
 
 module Navigator : sig

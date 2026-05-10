@@ -75,11 +75,11 @@ let handle_connect client port =
 
 (** Start the multiplexer using the given client *)
 let start client =
-  Chrome_api.Runtime.on_connect (handle_connect client)
+  Chrome_api.Port.on_connect (handle_connect client)
 
 (* Create a client. *)
 let create_client () =
-  let port = Chrome_api.Runtime.connect () in
+  let port = Chrome_api.Port.connect () in
 
   (* Need a recv_s and send_f *)
   let recv_s, push = Lwt_stream.create () in
