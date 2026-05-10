@@ -11,6 +11,7 @@ function createMock() {
     onMessage: [],
     onConnect: [],
     onRequestCompleted: [],
+    onCommand: [],
   };
 
   const ports = [];
@@ -101,6 +102,22 @@ function createMock() {
     },
     action: {
       setIcon: jest.fn(),
+    },
+    commands: {
+      onCommand: {
+        addListener: jest.fn((cb) => listeners.onCommand.push(cb)),
+      },
+    },
+    sidePanel: {
+      open: jest.fn(),
+    },
+    windows: {
+      create: jest.fn(),
+      getLastFocused: jest.fn((cb) => cb({ id: 1 })),
+    },
+    history: {
+      search: jest.fn((_query, cb) => { if (cb) cb([]); }),
+      getVisits: jest.fn((_query, cb) => { if (cb) cb([]); }),
     },
   };
 

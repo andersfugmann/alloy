@@ -285,7 +285,13 @@ let register_chrome_listeners () =
     setup_context_menus [] None);
   on_startup (fun () ->
     log "Browser started";
-    setup_context_menus [] None)
+    setup_context_menus [] None);
+  Chrome_api.Commands.on_command (fun cmd ->
+    match String.equal cmd "open-history" with
+    | true ->
+      Chrome_api.Windows.get_last_focused ~on_result:(fun window_id ->
+        Chrome_api.Side_panel.open_panel ~window_id)
+    | false -> ())
 
 (* -- Initialization *)
 
