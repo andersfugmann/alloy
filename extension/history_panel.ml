@@ -10,6 +10,7 @@ let status_el = Page_util.get_by_id "status"
 let search_urls_cb = Page_util.input_by_id "searchUrls"
 let search_titles_cb = Page_util.input_by_id "searchTitles"
 let sort_select = Page_util.select_by_id "sortBy"
+let max_age_select = Page_util.select_by_id "maxAge"
 
 let search_gen = ref 0
 let cached_results : Protocol.lookup_result list ref = ref []
@@ -82,6 +83,12 @@ let render_results results =
     (Printf.sprintf "%d result%s" n
       (match n with 1 -> "" | _ -> "s"))
 
+let get_max_age_days () =
+  let v = Js.to_string max_age_select##.value in
+  match String.is_empty v with
+  | true -> None
+  | false -> Int.of_string_opt v
+
 let get_scope () : Protocol.search_scope =
   let urls = Js.to_bool search_urls_cb##.checked in
   let titles = Js.to_bool search_titles_cb##.checked in
@@ -101,7 +108,8 @@ let do_search conn =
   | false ->
     Lwt.async (fun () ->
       let scope = get_scope () in
-      let* result = Client.call conn Lookup { query; scope; max_results = 100; max_age_days = None } in
+      let max_age_days = get_max_age_days () in
+      let* result = Client.call conn Lookup { query; scope; max_results = 100; max_age_days } in
       begin match result with
       | Ok results ->
         cached_results := results;
@@ -144,6 +152,13 @@ let () =
         Dom_html.Event.change
         (Dom_html.handler (fun _ev ->
           render_results !cached_results;
+          Js._true))
+        Js._false);
+      ignore (Dom_html.addEventListener
+        (max_age_select :> Dom_html.element Js.t)
+        Dom_html.Event.change
+        (Dom_html.handler (fun _ev ->
+          do_search conn;
           Js._true))
         Js._false))
     ~on_disconnect:(fun () ->
