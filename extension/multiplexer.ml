@@ -1,5 +1,6 @@
 open! Base
 open! Stdio
+open! Lwt.Syntax
 
 (* This is just a simple bridge to a client over Chrome channels *)
 (* TODO: Rename to port_multiplexer *)
@@ -18,7 +19,8 @@ let close close_var =
 
 let handle_broadcast port close_var push =
   let () = match is_closed close_var with
-    | true -> raise Lwt_stream.Closed
+    | true ->
+      raise Lwt_stream.Closed
     | false -> ()
   in
   match push with
@@ -69,28 +71,54 @@ let handle_connect client port =
   Client.register_broadcast client (handle_broadcast port close_var);
   Chrome_api.Port.on_message_json port (handle_receive client port close_var);
   Chrome_api.Port.on_disconnect port (handle_disconnect close_var);
+  Lwt.async (fun () ->
+      let* () = Client.closed client in
+      Chrome_api.Port.disconnect port;
+      Lwt.return_unit
+    );
   ()
 
+type event = Closed | Connect of Chrome_api.port
 
+type t = { stream: event Lwt_stream.t; push: event -> unit }
+
+let init () =
+  let stream, push = Lwt_stream.create () in
+  let push e = push (Some e) in
+  Chrome_api.Port.on_connect (fun port -> push (Connect port));
+  { stream; push }
+
+let rec consume_events stream client =
+  let* event = Lwt_stream.next stream in
+  match event with
+  | Closed -> Lwt.return_unit
+  | Connect port ->
+    handle_connect client port;
+    consume_events stream client
 
 (** Start the multiplexer using the given client *)
-let start client =
-  Chrome_api.Port.on_connect (handle_connect client)
+let start t client =
+  Lwt.async (fun () ->
+      let* () = Client.closed client in
+      t.push Closed;
+      Lwt.return_unit
+    );
+  Lwt.async (fun () -> consume_events t.stream client);
+  ()
 
 (* Create a client. *)
 let create_client () =
   let port = Chrome_api.Port.connect () in
 
-  (* Need a recv_s and send_f *)
   let recv_s, push = Lwt_stream.create () in
+  (* Disconnect recv_s *)
+  Chrome_api.Port.on_disconnect port (fun () -> push (None));
 
   let send_f port frame =
     Protocol.raw_frame_to_yojson frame
     |> Yojson.Safe.to_string
     |> Chrome_api.Port.post_message_json port
   in
-  let send_f = send_f port in
-
   Chrome_api.Port.on_message_json port (handle_message push);
-
+  let send_f = send_f port in
   Client.init ~recv_s ~send_f ()

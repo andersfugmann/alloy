@@ -187,6 +187,8 @@ let handle_context_menu menu_id link_url page_url tab_id =
 
 (* -- Connection management *)
 
+let mux = Multiplexer.init ()
+
 let rec connect () =
   Chrome_api.Storage.get_local [ "tenant_name"; "daemon_host"; "daemon_port"; "debug_logging" ]
     ~on_result:(fun pairs ->
@@ -223,7 +225,7 @@ and connect_with_settings tenant_name daemon_host daemon_port ~debug_logging =
         log (Printf.sprintf "Registered as tenant: %s" (Client.name client));
         client_ref := Some client;
         update_badge true;
-        Multiplexer.start client;
+        Multiplexer.start mux client;
         Client.register_broadcast client handle_broadcast;
         let* () = Client.closed client in
         handle_disconnect ();
