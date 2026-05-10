@@ -39,6 +39,7 @@ end
 
 module Windows : sig
   val create_popup : url:string -> width:int -> height:int -> unit
+  val get_last_focused : on_result:(int -> unit) -> unit
 end
 
 module Storage : sig
@@ -73,4 +74,20 @@ end
 
 module Navigator : sig
   val get_browser_brand : unit -> string
+end
+
+module Commands : sig
+  val on_command : (string -> unit) -> unit
+end
+
+module Side_panel : sig
+  val open_panel : window_id:int -> unit
+end
+
+module History : sig
+  val search :
+    max_results:int ->
+    f:(url:string -> title:string -> last_visit_time:float -> unit) ->
+    unit
+  val get_visits : string -> f:(float list -> unit) -> unit
 end

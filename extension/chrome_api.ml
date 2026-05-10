@@ -178,6 +178,13 @@ module Windows = struct
                 ("width", inject width);
                 ("height", inject height);
               ]) |]
+
+  let get_last_focused ~on_result =
+    let cb = Js.wrap_callback (fun (win : _ Js.t) ->
+      let id : int = Js.Unsafe.get win (Js.string "id") in
+      on_result id)
+    in
+    call windows "getLastFocused" [| inject cb |]
 end
 
 (* ── Storage ─────────────────────────────────────────────────────── *)
@@ -398,4 +405,73 @@ module Navigator = struct
       match String.is_empty from_ua_data with
       | false -> from_ua_data
       | true -> brand_from_user_agent (Js.to_string nav##.userAgent)
+end
+
+(* ── Commands ────────────────────────────────────────────────────── *)
+
+module Commands = struct
+  let on_command f =
+    add_listener (get chrome "commands") "onCommand"
+      (inject (Js.wrap_callback (fun (cmd : Js.js_string Js.t) ->
+        f (Js.to_string cmd))))
+end
+
+(* ── Side Panel ──────────────────────────────────────────────────── *)
+
+module Side_panel = struct
+  let open_panel ~window_id =
+    let opts = js_obj [("windowId", inject window_id)] in
+    call (get chrome "sidePanel") "open" [| inject opts |]
+end
+
+(* ── History ─────────────────────────────────────────────────────── *)
+
+module History = struct
+  let history () : _ Js.t = get chrome "history"
+
+  class type history_item = object
+    method url : Js.js_string Js.t Js.Optdef.t Js.readonly_prop
+    method title : Js.js_string Js.t Js.Optdef.t Js.readonly_prop
+    method lastVisitTime : Js.number Js.t Js.Optdef.t Js.readonly_prop
+  end
+
+  class type visit_item = object
+    method visitTime : Js.number Js.t Js.Optdef.t Js.readonly_prop
+  end
+
+  let search ~max_results ~f =
+    let query = js_obj [
+      ("text", inject (Js.string ""));
+      ("maxResults", inject max_results);
+      ("startTime", inject 0);
+    ] in
+    let cb = Js.wrap_callback (fun (items : history_item Js.t Js.js_array Js.t) ->
+      let len = items##.length in
+      List.init len ~f:(fun i ->
+        Js.Optdef.case (Js.array_get items i)
+          (fun () -> ())
+          (fun item ->
+            let url = Js.Optdef.case item##.url (fun () -> "") Js.to_string in
+            let title = Js.Optdef.case item##.title (fun () -> "") Js.to_string in
+            let last_visit_time =
+              Js.Optdef.case item##.lastVisitTime (fun () -> 0.0) Js.float_of_number
+            in
+            f ~url ~title ~last_visit_time))
+      |> (ignore : unit list -> unit))
+    in
+    call (history ()) "search" [| inject query; inject cb |]
+
+  let get_visits url ~f =
+    let query = js_obj [ ("url", inject (Js.string url)) ] in
+    let cb = Js.wrap_callback (fun (items : visit_item Js.t Js.js_array Js.t) ->
+      let len = items##.length in
+      let times = List.init len ~f:(fun i ->
+        Js.Optdef.case (Js.array_get items i)
+          (fun () -> 0.0)
+          (fun item ->
+            Js.Optdef.case item##.visitTime (fun () -> 0.0) Js.float_of_number))
+      in
+      f times)
+    in
+    call (history ()) "getVisits" [| inject query; inject cb |]
 end

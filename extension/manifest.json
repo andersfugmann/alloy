@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Alloy",
-  "version": "0.9.45",
+  "version": "0.9.46",
   "description": "Route URLs between browser profiles",
   "permissions": [
     "webNavigation",
@@ -11,7 +11,8 @@
     "tabs",
     "activeTab",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "history"
   ],
   "host_permissions": [
     "http://*/*",
@@ -32,6 +33,15 @@
     }
   },
   "options_page": "options.html",
+  "commands": {
+    "open-history": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+H",
+        "mac": "Command+Shift+H"
+      },
+      "description": "Open history search"
+    }
+  },
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
