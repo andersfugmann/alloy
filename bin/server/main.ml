@@ -184,22 +184,6 @@ let migrate_rules_from_config config_path json =
     | Error msg ->
       log "warning: could not parse rules from config: %s" msg
 
-let migrate_excludes_from_config config_path json =
-  let excludes_path = excludes_path_of config_path in
-  match Stdlib.Sys.file_exists excludes_path with
-  | true -> ()
-  | false ->
-    let excludes_json = Yojson.Safe.Util.member "history_exclude_patterns" json in
-    match excludes_json with
-    | `Null -> ()
-    | excludes_json ->
-      match Protocol.exclude_patterns_of_yojson excludes_json with
-      | Ok patterns ->
-        log "found history_exclude_patterns in config.json, migrating to exclude_patterns.json";
-        save_excludes config_path patterns
-      | Error msg ->
-        log "warning: could not parse exclude patterns from config: %s" msg
-
 let fill_config_defaults (config : Protocol.config) : Protocol.config =
   let listen =
     match config.listen with
@@ -219,7 +203,6 @@ let load_config path =
     let content = In_channel.read_all path in
     Result.bind (Protocol.parse_json_string content) ~f:(fun json ->
       migrate_rules_from_config path json;
-      migrate_excludes_from_config path json;
       match Protocol.config_of_yojson json with
       | Ok config ->
         let config = fill_config_defaults config in
