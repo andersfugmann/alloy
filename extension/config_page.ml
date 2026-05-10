@@ -42,6 +42,7 @@ let connected_tenants : Set.M(String).t ref =
 
 let editing_tenant_id : string option ref = ref None
 let editing_rule_index : int option ref = ref None
+let editing_exclude_index : int option ref = ref None
 
 (* -- DOM elements -- *)
 
@@ -54,6 +55,8 @@ let tenant_list_el = Page_util.get_by_id "tenantList"
 let rule_list_el = Page_util.get_by_id "ruleList"
 let tenant_form_el = Page_util.get_by_id "tenantForm"
 let rule_form_el = Page_util.get_by_id "ruleForm"
+let exclude_list_el = Page_util.get_by_id "excludeList"
+let exclude_form_el = Page_util.get_by_id "excludeForm"
 let import_btn = Page_util.get_by_id "btnImportHistory"
 let import_msg = Page_util.get_by_id "importMsg"
 
@@ -438,34 +441,83 @@ let render_defaults () =
     Js.string (Int.to_string d.cooldown_seconds);
   (Page_util.input_by_id "dfTimeout")##.value :=
     Js.string (Int.to_string d.browser_launch_timeout);
-  populate_tenant_selects ();
-  let textarea = Page_util.get_by_id "excludePatterns" in
-  let text = String.concat ~sep:"\n" !config.history_exclude_patterns in
-  (Js.Unsafe.coerce textarea)##.value := Js.string text;
-  Page_util.set_text (Page_util.get_by_id "excludeError") ""
+  populate_tenant_selects ()
 
-let read_excludes () =
-  let textarea = Page_util.get_by_id "excludePatterns" in
-  let text = Js.to_string (Js.Unsafe.coerce textarea)##.value in
-  let patterns =
-    String.split_lines text
-    |> List.map ~f:String.strip
-    |> List.filter ~f:(fun s -> not (String.is_empty s))
+(* -- Exclude pattern CRUD -- *)
+
+let rec render_excludes () =
+  let patterns = !config.history_exclude_patterns in
+  match List.is_empty patterns with
+  | true ->
+    Page_util.set_html exclude_list_el
+      {|<div class="card-empty">No exclude patterns configured.</div>|}
+  | false ->
+    let html =
+      List.mapi patterns ~f:(fun i p ->
+        Printf.sprintf
+          {|<div class="row-item exclude-row">
+  <div class="rule-pattern" title="%s">%s</div>
+  <div class="row-actions">
+    <button class="btn-icon" title="Edit" data-edit-exclude="%d">✏️</button>
+    <button class="btn-icon" title="Delete" data-del-exclude="%d">🗑️</button>
+  </div>
+</div>|}
+          (Page_util.escape_html p)
+          (Page_util.escape_html p)
+          i i)
+      |> String.concat
+    in
+    Page_util.set_html exclude_list_el html;
+    Page_util.bind_clicks exclude_list_el
+      ~selector:"[data-edit-exclude]" ~attr:"data-edit-exclude"
+      ~f:(fun idx_s -> edit_exclude (Int.of_string idx_s));
+    Page_util.bind_clicks exclude_list_el
+      ~selector:"[data-del-exclude]" ~attr:"data-del-exclude"
+      ~f:(fun idx_s ->
+        let idx = Int.of_string idx_s in
+        let updated =
+          List.filteri patterns ~f:(fun i _ -> not (Int.equal i idx))
+        in
+        config := { !config with history_exclude_patterns = updated };
+        render_excludes ())
+
+and edit_exclude idx =
+  match List.nth !config.history_exclude_patterns idx with
+  | None -> ()
+  | Some p ->
+    editing_exclude_index := Some idx;
+    (Page_util.input_by_id "efPattern")##.value := Js.string p;
+    Page_util.set_text (Page_util.get_by_id "efSave") "Update pattern";
+    Page_util.add_class exclude_form_el "visible"
+
+and save_exclude () =
+  let pattern =
+    Js.to_string (Page_util.input_by_id "efPattern")##.value |> String.strip
   in
-  let errors =
-    List.filter_map patterns ~f:(fun p ->
-      match Page_util.validate_regexp p with
-      | Ok () -> None
-      | Error msg -> Some (Printf.sprintf "%s: %s" p msg))
-  in
-  let error_el = Page_util.get_by_id "excludeError" in
-  match errors with
-  | [] ->
-    Page_util.set_text error_el "";
-    Some patterns
-  | _ ->
-    Page_util.set_text error_el (String.concat ~sep:"\n" errors);
-    None
+  match String.is_empty pattern with
+  | true -> show_msg "Pattern is required." "error"
+  | false ->
+    match Page_util.validate_regexp pattern with
+    | Error msg ->
+      show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
+    | Ok () ->
+      let patterns = !config.history_exclude_patterns in
+      let updated =
+        match !editing_exclude_index with
+        | Some idx ->
+          List.mapi patterns ~f:(fun i p ->
+            match Int.equal i idx with true -> pattern | false -> p)
+        | None -> patterns @ [ pattern ]
+      in
+      config := { !config with history_exclude_patterns = updated };
+      reset_exclude_form ();
+      render_excludes ()
+
+and reset_exclude_form () =
+  editing_exclude_index := None;
+  (Page_util.input_by_id "efPattern")##.value := Js.string "";
+  Page_util.set_text (Page_util.get_by_id "efSave") "Add pattern";
+  Page_util.remove_class exclude_form_el "visible"
 
 let read_defaults () =
   let cooldown =
@@ -490,17 +542,12 @@ let read_defaults () =
 
 let save_config () =
   read_defaults ();
-  match read_excludes () with
-  | None ->
-    show_msg "Fix invalid exclude patterns before saving." "error"
-  | Some patterns ->
-    config := { !config with history_exclude_patterns = patterns };
-    show_msg "Saving\u{2026}" "";
-    send_command Set_config !config
-      ~on_response:(fun result ->
-        match result with
-        | Ok () -> show_msg "Configuration saved." "success"
-        | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
+  show_msg "Saving\u{2026}" "";
+  send_command Set_config !config
+    ~on_response:(fun result ->
+      match result with
+      | Ok () -> show_msg "Configuration saved." "success"
+      | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
 
 (* -- Fetch config + status -- *)
 
@@ -523,7 +570,8 @@ let fetch_config () =
          Page_util.set_display content_el "block";
          render_tenants ();
          render_rules !fetched_rules;
-         render_defaults ())
+         render_defaults ();
+         render_excludes ())
   in
 
   send_command Get_config ()
@@ -624,6 +672,13 @@ let () =
     reset_rule_form ());
   Page_util.on_click (Page_util.get_by_id "rfSave") (fun () ->
     save_rule ());
+  Page_util.on_click (Page_util.get_by_id "btnAddExclude") (fun () ->
+    reset_exclude_form ();
+    Page_util.add_class exclude_form_el "visible");
+  Page_util.on_click (Page_util.get_by_id "efCancel") (fun () ->
+    reset_exclude_form ());
+  Page_util.on_click (Page_util.get_by_id "efSave") (fun () ->
+    save_exclude ());
   Page_util.on_click (Page_util.get_by_id "btnSave") (fun () ->
     save_config ());
   Page_util.on_click import_btn (fun () ->
