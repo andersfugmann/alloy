@@ -24,6 +24,7 @@ let is_internal_url = Page_util.is_internal_url
 
 let client_ref : Client.t option ref = ref None
 let debug_ref = ref false
+let status_codes : int Map.M(Int).t ref = ref (Map.empty (module Int))
 
 let update_badge connected =
   match connected with
@@ -119,17 +120,14 @@ let handle_broadcast push_opt =
 (* -- Chrome event handlers (direct callbacks) *)
 
 let handle_navigation url tab_id =
+  status_codes := Map.remove !status_codes tab_id;
   match Option.is_some !client_ref && not (is_internal_url url) with
   | false -> ()
   | true ->
     Lwt.async (fun () ->
-      let (title_promise, title_resolver) = Lwt.wait () in
-      Chrome_api.Tabs.get_title tab_id ~on_result:(fun title ->
-        Lwt.wakeup_later title_resolver title);
-      let* title = title_promise in
       let t0 = Chrome_api.performance_now () in
       debug (Printf.sprintf "→ Open %s" url);
-      let* result = call Open { url; title } in
+      let* result = call Open { url; title = None } in
       let elapsed = Chrome_api.performance_now () -. t0 in
       (match result with
        | Ok Protocol.Local ->
@@ -139,6 +137,33 @@ let handle_navigation url tab_id =
          Chrome_api.Tabs.remove tab_id
        | Error msg -> log (Printf.sprintf "Open error: %s" msg));
       Lwt.return_unit)
+
+let handle_request_completed _url tab_id status_code =
+  status_codes := Map.set !status_codes ~key:tab_id ~data:status_code
+
+let handle_page_completed url tab_id frame_id =
+  match frame_id with
+  | 0 ->
+    let status = Map.find !status_codes tab_id in
+    status_codes := Map.remove !status_codes tab_id;
+    let is_error =
+      match status with
+      | None -> true
+      | Some code -> code >= 400
+    in
+    (match Option.is_some !client_ref && not (is_internal_url url) && not is_error with
+     | false -> ()
+     | true ->
+       Lwt.async (fun () ->
+         let (title_promise, title_resolver) = Lwt.wait () in
+         Chrome_api.Tabs.get_title tab_id ~on_result:(fun title ->
+           Lwt.wakeup_later title_resolver title);
+         let* title = title_promise in
+         debug (Printf.sprintf "→ Page_loaded %s (title: %s)" url
+           (Option.value title ~default:"<none>"));
+         let* _result = call Page_loaded { url; title } in
+         Lwt.return_unit))
+  | _ -> ()
 
 let handle_context_menu menu_id link_url page_url tab_id =
   let effective_url =
@@ -249,6 +274,10 @@ let register_chrome_listeners () =
       match frame_id with
       | 0 -> handle_navigation url tab_id
       | _ -> ());
+  Chrome_api.Web_request.on_completed (fun url tab_id status_code ->
+    handle_request_completed url tab_id status_code);
+  Chrome_api.Web_navigation.on_completed (fun url tab_id frame_id ->
+    handle_page_completed url tab_id frame_id);
   on_context_menu_clicked (fun menu_id link_url page_url tab_id ->
       handle_context_menu menu_id link_url page_url tab_id);
   on_installed (fun () ->
