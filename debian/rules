@@ -7,14 +7,18 @@ override_dh_auto_build:
 	dune build --profile release bin/server/main.exe bin/client/main.exe \
 		bin/bridge/main.exe \
 		extension/main.bc.js extension/popup.bc.js extension/config_page.bc.js \
-		extension/options_page.bc.js extension/add_rule_page.bc.js
+		extension/options_page.bc.js extension/add_rule_page.bc.js \
+		extension/history_panel.bc.js
 	mkdir -p _build/ext-staging/icons
-	cp extension/manifest.json extension/popup.html extension/add_rule.html extension/config.html extension/options.html _build/ext-staging/
+	cp extension/manifest.json extension/popup.html extension/add_rule.html \
+		extension/config.html extension/options.html extension/history_panel.html \
+		_build/ext-staging/
 	cp _build/default/extension/main.bc.js _build/ext-staging/main.js
 	cp _build/default/extension/popup.bc.js _build/ext-staging/popup.js
 	cp _build/default/extension/config_page.bc.js _build/ext-staging/config.js
 	cp _build/default/extension/options_page.bc.js _build/ext-staging/options.js
 	cp _build/default/extension/add_rule_page.bc.js _build/ext-staging/add_rule.js
+	cp _build/default/extension/history_panel.bc.js _build/ext-staging/history_panel.js
 	cp extension/icons/* _build/ext-staging/icons/
 
 override_dh_auto_test:

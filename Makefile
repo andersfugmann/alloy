@@ -24,15 +24,17 @@ test-extension: build _build/node_modules/.stamp ## Build and run extension test
 
 dev-extension: build ## Stage unpacked extension in _build/dev-extension
 	dune build extension/main.js extension/popup.js extension/config.js \
-		extension/options.js extension/add_rule.js
+		extension/options.js extension/add_rule.js extension/history_panel.js
 	mkdir -p _build/dev-extension/icons
 	cp extension/manifest.json extension/popup.html extension/add_rule.html \
-		extension/config.html extension/options.html _build/dev-extension/
+		extension/config.html extension/options.html extension/history_panel.html \
+		_build/dev-extension/
 	cp _build/default/extension/main.js _build/dev-extension/
 	cp _build/default/extension/popup.js _build/dev-extension/
 	cp _build/default/extension/config.js _build/dev-extension/
 	cp _build/default/extension/options.js _build/dev-extension/
 	cp _build/default/extension/add_rule.js _build/dev-extension/
+	cp _build/default/extension/history_panel.js _build/dev-extension/
 	cp extension/icons/* _build/dev-extension/icons/
 	@echo "Extension staged in _build/dev-extension/"
 	@echo "Load as unpacked extension in chrome://extensions"
