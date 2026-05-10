@@ -9,41 +9,43 @@ let rec swap_nth n = function
   | x :: rest -> x :: swap_nth (n - 1) rest
   | l -> l
 
-(* -- Connection -- *)
+(* -- State -- *)
 
-let conn_ref : Client.t option ref = ref None
+type page_state = {
+  conn : Client.t option;
+  config : Protocol.config;
+  exclude_patterns : string list;
+  connected_tenants : Set.M(String).t;
+  editing_tenant_id : string option;
+  editing_rule_index : int option;
+  editing_exclude_index : int option;
+}
 
-let send_command : type req resp. (req, resp) Protocol.command -> req ->
-    on_response:((resp, string) Result.t -> unit) -> unit =
-  fun cmd params ~on_response ->
-    match !conn_ref with
-    | None -> on_response (Error "not connected")
-    | Some conn ->
-      Lwt.async (fun () ->
-        let* result = Client.call conn cmd params in
-        on_response result;
-        Lwt.return_unit)
-
-(* -- Mutable state (required for async UI callbacks) -- *)
-
-let config : Protocol.config ref =
+let state =
   ref
-    Protocol.{
-      listen = Constants.default_listen;
-      allowed_networks = Constants.default_allowed_networks;
-      tenants = [];
-      defaults =
-        { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
+    {
+      conn = None;
+      config =
+        Protocol.
+          {
+            listen = Constants.default_listen;
+            allowed_networks = Constants.default_allowed_networks;
+            tenants = [];
+            defaults =
+              { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
+          };
+      exclude_patterns = [];
+      connected_tenants = Set.empty (module String);
+      editing_tenant_id = None;
+      editing_rule_index = None;
+      editing_exclude_index = None;
     }
 
-let exclude_patterns : string list ref = ref []
-
-let connected_tenants : Set.M(String).t ref =
-  ref (Set.empty (module String))
-
-let editing_tenant_id : string option ref = ref None
-let editing_rule_index : int option ref = ref None
-let editing_exclude_index : int option ref = ref None
+let call : type req resp. (req, resp) Protocol.command -> req -> (resp, string) Result.t Lwt.t =
+  fun cmd params ->
+    match !state.conn with
+    | None -> Lwt.return (Error "not connected")
+    | Some conn -> Client.call conn cmd params
 
 (* -- DOM elements -- *)
 
@@ -110,7 +112,7 @@ let populate_rule_target selected =
   let sel = Page_util.select_by_id "rfTarget" in
   Page_util.set_html (sel :> Dom_html.element Js.t) "";
   let doc = Dom_html.document in
-  List.iter !config.tenants ~f:(fun (id, tc) ->
+  List.iter !state.config.tenants ~f:(fun (id, tc) ->
     let opt =
       Page_util.create_option doc ~value:id
         ~text:(match String.is_empty tc.label with true -> id | false -> tc.label)
@@ -123,7 +125,7 @@ let populate_tenant_selects () =
   let current_val =
     let v = Js.to_string unmatched_sel##.value in
     match String.is_empty v with
-    | true -> !config.defaults.unmatched
+    | true -> !state.config.defaults.unmatched
     | false -> v
   in
   Page_util.set_html (unmatched_sel :> Dom_html.element Js.t) "";
@@ -134,7 +136,7 @@ let populate_tenant_selects () =
       ~selected:(String.equal current_val "local")
   in
   Dom.appendChild unmatched_sel local_opt;
-  List.iter !config.tenants ~f:(fun (id, tc) ->
+  List.iter !state.config.tenants ~f:(fun (id, tc) ->
     let opt =
       Page_util.create_option doc ~value:id
         ~text:(match String.is_empty tc.label with true -> id | false -> tc.label)
@@ -146,7 +148,7 @@ let populate_tenant_selects () =
 (* -- Tenant CRUD -- *)
 
 let rec render_tenants () =
-  let tenants = !config.tenants in
+  let tenants = !state.config.tenants in
   match List.is_empty tenants with
   | true ->
     Page_util.set_html tenant_list_el
@@ -154,7 +156,7 @@ let rec render_tenants () =
   | false ->
     let html =
       List.map tenants ~f:(fun (id, t) ->
-        let is_connected = Set.mem !connected_tenants id in
+        let is_connected = Set.mem !state.connected_tenants id in
         let dot_class =
           match is_connected with true -> "connected" | false -> "disconnected"
         in
@@ -216,10 +218,10 @@ let rec render_tenants () =
       ~f:delete_tenant
 
 and edit_tenant id =
-  match List.Assoc.find !config.tenants ~equal:String.equal id with
+  match List.Assoc.find !state.config.tenants ~equal:String.equal id with
   | None -> ()
   | Some t ->
-    editing_tenant_id := Some id;
+    state := { !state with editing_tenant_id = Some id };
     let tf_id = Page_util.input_by_id "tfId" in
     tf_id##.value := Js.string id;
     tf_id##.disabled := Js._true;
@@ -237,10 +239,13 @@ and edit_tenant id =
     Page_util.add_class tenant_form_el "visible"
 
 and delete_tenant id =
-  config :=
-    { !config with
-      tenants =
-        List.Assoc.remove !config.tenants ~equal:String.equal id
+  state :=
+    { !state with
+      config =
+        { !state.config with
+          tenants =
+            List.Assoc.remove !state.config.tenants ~equal:String.equal id
+        }
     };
   render_tenants ();
   fetch_and_render_rules ();
@@ -255,7 +260,7 @@ and save_tenant () =
   | true -> show_msg "Tenant ID is required." "error"
   | false ->
     let existing =
-      List.Assoc.find !config.tenants ~equal:String.equal id
+      List.Assoc.find !state.config.tenants ~equal:String.equal id
     in
     let entry : Protocol.tenant_config =
       {
@@ -266,17 +271,20 @@ and save_tenant () =
         brand = Option.bind existing ~f:(fun e -> e.brand);
       }
     in
-    config :=
-      { !config with
-        tenants =
-          List.Assoc.add !config.tenants ~equal:String.equal id entry
+    state :=
+      { !state with
+        config =
+          { !state.config with
+            tenants =
+              List.Assoc.add !state.config.tenants ~equal:String.equal id entry
+          }
       };
     reset_tenant_form ();
     render_tenants ();
     populate_tenant_selects ()
 
 and reset_tenant_form () =
-  editing_tenant_id := None;
+  state := { !state with editing_tenant_id = None };
   let tf_id = Page_util.input_by_id "tfId" in
   tf_id##.value := Js.string "";
   tf_id##.disabled := Js._false;
@@ -291,24 +299,26 @@ and reset_tenant_form () =
 (* -- Rule CRUD -- *)
 
 and fetch_and_render_rules () =
-  send_command Get_rules ()
-    ~on_response:(fun result ->
-      match result with
-      | Ok r -> render_rules r
-      | Error msg ->
-        show_msg (Printf.sprintf "Failed to load rules: %s" msg) "error")
+  Lwt.async (fun () ->
+    let* result = call Get_rules () in
+    (match result with
+     | Ok r -> render_rules r
+     | Error msg ->
+       show_msg (Printf.sprintf "Failed to load rules: %s" msg) "error");
+    Lwt.return_unit)
 
 and send_and_refetch_rules updated =
-  send_command Set_rules updated
-    ~on_response:(fun result ->
-      match result with
-      | Ok () -> fetch_and_render_rules ()
-      | Error msg ->
-        show_msg (Printf.sprintf "Error saving rules: %s" msg) "error")
+  Lwt.async (fun () ->
+    let* result = call Set_rules updated in
+    (match result with
+     | Ok () -> fetch_and_render_rules ()
+     | Error msg ->
+       show_msg (Printf.sprintf "Error saving rules: %s" msg) "error");
+    Lwt.return_unit)
 
 and render_rules rules =
   let resolve_label target =
-    match List.Assoc.find !config.tenants ~equal:String.equal target with
+    match List.Assoc.find !state.config.tenants ~equal:String.equal target with
     | Some tc ->
       (match String.is_empty tc.label with true -> target | false -> tc.label)
     | None -> target
@@ -384,7 +394,7 @@ and edit_rule rules idx =
   match List.nth rules idx with
   | None -> ()
   | Some r ->
-    editing_rule_index := Some idx;
+    state := { !state with editing_rule_index = Some idx };
     (Page_util.input_by_id "rfPattern")##.value := Js.string r.pattern;
     populate_rule_target r.target;
     Page_util.set_text (Page_util.get_by_id "rfSave") "Update rule";
@@ -406,30 +416,32 @@ and save_rule () =
           show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
         | Ok () ->
           let rule : Protocol.rule = { pattern; target; enabled = true } in
-          send_command Get_rules ()
-            ~on_response:(fun result ->
-              match result with
-              | Ok current ->
-                let updated =
-                  match !editing_rule_index with
-                  | Some idx ->
-                    let prev_enabled =
-                      match List.nth current idx with
-                      | Some r -> r.enabled
-                      | None -> true
-                    in
-                    List.mapi current ~f:(fun i r ->
-                      match Int.equal i idx with
-                      | true -> { rule with enabled = prev_enabled }
-                      | false -> r)
-                  | None -> current @ [ rule ]
-                in
-                reset_rule_form ();
-                send_and_refetch_rules updated
-              | Error msg -> show_msg (Printf.sprintf "Failed to fetch rules: %s" msg) "error")))
+          Lwt.async (fun () ->
+            let* result = call Get_rules () in
+            (match result with
+             | Ok current ->
+               let updated =
+                 match !state.editing_rule_index with
+                 | Some idx ->
+                   let prev_enabled =
+                     match List.nth current idx with
+                     | Some r -> r.enabled
+                     | None -> true
+                   in
+                   List.mapi current ~f:(fun i r ->
+                     match Int.equal i idx with
+                     | true -> { rule with enabled = prev_enabled }
+                     | false -> r)
+                 | None -> current @ [ rule ]
+               in
+               reset_rule_form ();
+               send_and_refetch_rules updated
+             | Error msg ->
+               show_msg (Printf.sprintf "Failed to fetch rules: %s" msg) "error");
+            Lwt.return_unit)))
 
 and reset_rule_form () =
-  editing_rule_index := None;
+  state := { !state with editing_rule_index = None };
   (Page_util.input_by_id "rfPattern")##.value := Js.string "";
   Page_util.set_text (Page_util.get_by_id "rfSave") "Add rule";
   Page_util.remove_class rule_form_el "visible"
@@ -437,7 +449,7 @@ and reset_rule_form () =
 (* -- Defaults -- *)
 
 let render_defaults () =
-  let d = !config.defaults in
+  let d = !state.config.defaults in
   (Page_util.input_by_id "dfCooldown")##.value :=
     Js.string (Int.to_string d.cooldown_seconds);
   (Page_util.input_by_id "dfTimeout")##.value :=
@@ -447,25 +459,27 @@ let render_defaults () =
 (* -- Exclude pattern CRUD -- *)
 
 let rec fetch_and_render_excludes () =
-  send_command Get_exclude_patterns ()
-    ~on_response:(fun result ->
-      match result with
-      | Ok p ->
-        exclude_patterns := p;
-        render_excludes ()
-      | Error msg ->
-        show_msg (Printf.sprintf "Failed to load exclude patterns: %s" msg) "error")
+  Lwt.async (fun () ->
+    let* result = call Get_exclude_patterns () in
+    (match result with
+     | Ok p ->
+       state := { !state with exclude_patterns = p };
+       render_excludes ()
+     | Error msg ->
+       show_msg (Printf.sprintf "Failed to load exclude patterns: %s" msg) "error");
+    Lwt.return_unit)
 
 and send_and_refetch_excludes updated =
-  send_command Set_exclude_patterns updated
-    ~on_response:(fun result ->
-      match result with
-      | Ok () -> fetch_and_render_excludes ()
-      | Error msg ->
-        show_msg (Printf.sprintf "Error saving exclude patterns: %s" msg) "error")
+  Lwt.async (fun () ->
+    let* result = call Set_exclude_patterns updated in
+    (match result with
+     | Ok () -> fetch_and_render_excludes ()
+     | Error msg ->
+       show_msg (Printf.sprintf "Error saving exclude patterns: %s" msg) "error");
+    Lwt.return_unit)
 
 and render_excludes () =
-  let patterns = !exclude_patterns in
+  let patterns = !state.exclude_patterns in
   match List.is_empty patterns with
   | true ->
     Page_util.set_html exclude_list_el
@@ -500,10 +514,10 @@ and render_excludes () =
         send_and_refetch_excludes updated)
 
 and edit_exclude idx =
-  match List.nth !exclude_patterns idx with
+  match List.nth !state.exclude_patterns idx with
   | None -> ()
   | Some p ->
-    editing_exclude_index := Some idx;
+    state := { !state with editing_exclude_index = Some idx };
     (Page_util.input_by_id "efPattern")##.value := Js.string p;
     Page_util.set_text (Page_util.get_by_id "efSave") "Update pattern";
     Page_util.add_class exclude_form_el "visible"
@@ -519,24 +533,25 @@ and save_exclude () =
     | Error msg ->
       show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
     | Ok () ->
-      send_command Get_exclude_patterns ()
-        ~on_response:(fun result ->
-          match result with
-          | Ok current ->
-            let updated =
-              match !editing_exclude_index with
-              | Some idx ->
-                List.mapi current ~f:(fun i p ->
-                  match Int.equal i idx with true -> pattern | false -> p)
-              | None -> current @ [ pattern ]
-            in
-            reset_exclude_form ();
-            send_and_refetch_excludes updated
-          | Error msg ->
-            show_msg (Printf.sprintf "Failed to fetch exclude patterns: %s" msg) "error")
+      Lwt.async (fun () ->
+        let* result = call Get_exclude_patterns () in
+        (match result with
+         | Ok current ->
+           let updated =
+             match !state.editing_exclude_index with
+             | Some idx ->
+               List.mapi current ~f:(fun i p ->
+                 match Int.equal i idx with true -> pattern | false -> p)
+             | None -> current @ [ pattern ]
+           in
+           reset_exclude_form ();
+           send_and_refetch_excludes updated
+         | Error msg ->
+           show_msg (Printf.sprintf "Failed to fetch exclude patterns: %s" msg) "error");
+        Lwt.return_unit)
 
 and reset_exclude_form () =
-  editing_exclude_index := None;
+  state := { !state with editing_exclude_index = None };
   (Page_util.input_by_id "efPattern")##.value := Js.string "";
   Page_util.set_text (Page_util.get_by_id "efSave") "Add pattern";
   Page_util.remove_class exclude_form_el "visible"
@@ -555,9 +570,12 @@ let read_defaults () =
   let unmatched =
     Js.to_string (Page_util.select_by_id "dfUnmatched")##.value
   in
-  config :=
-    { !config with
-      defaults = { unmatched; cooldown_seconds = cooldown; browser_launch_timeout = timeout }
+  state :=
+    { !state with
+      config =
+        { !state.config with
+          defaults = { unmatched; cooldown_seconds = cooldown; browser_launch_timeout = timeout }
+        }
     }
 
 (* -- Save config -- *)
@@ -565,11 +583,12 @@ let read_defaults () =
 let save_config () =
   read_defaults ();
   show_msg "Saving\u{2026}" "";
-  send_command Set_config !config
-    ~on_response:(fun result ->
-      match result with
-      | Ok () -> show_msg "Configuration saved." "success"
-      | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
+  Lwt.async (fun () ->
+    let* result = call Set_config !state.config in
+    (match result with
+     | Ok () -> show_msg "Configuration saved." "success"
+     | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error");
+    Lwt.return_unit)
 
 (* -- Fetch config + status -- *)
 
@@ -595,50 +614,56 @@ let fetch_config () =
          render_tenants ();
          render_rules !fetched_rules;
          render_defaults ();
-         exclude_patterns := !fetched_excludes;
+         state := { !state with exclude_patterns = !fetched_excludes };
          render_excludes ())
   in
 
-  send_command Get_config ()
-    ~on_response:(fun result ->
-      (match result with
-       | Ok cfg ->
-         set_status true;
-         config := cfg;
-         config_ok := true
-       | Error _ -> set_status false);
-      pending := !pending - 1;
-      finish_init ());
+  Lwt.async (fun () ->
+    let* result = call Get_config () in
+    (match result with
+     | Ok cfg ->
+       set_status true;
+       state := { !state with config = cfg };
+       config_ok := true
+     | Error _ -> set_status false);
+    pending := !pending - 1;
+    finish_init ();
+    Lwt.return_unit);
 
-  send_command Get_rules ()
-    ~on_response:(fun result ->
-      (match result with
-       | Ok r ->
-         fetched_rules := r;
-         rules_ok := true
-       | Error _ -> ());
-      pending := !pending - 1;
-      finish_init ());
+  Lwt.async (fun () ->
+    let* result = call Get_rules () in
+    (match result with
+     | Ok r ->
+       fetched_rules := r;
+       rules_ok := true
+     | Error _ -> ());
+    pending := !pending - 1;
+    finish_init ();
+    Lwt.return_unit);
 
-  send_command Get_exclude_patterns ()
-    ~on_response:(fun result ->
-      (match result with
-       | Ok p ->
-         fetched_excludes := p;
-         excludes_ok := true
-       | Error _ -> ());
-      pending := !pending - 1;
-      finish_init ());
+  Lwt.async (fun () ->
+    let* result = call Get_exclude_patterns () in
+    (match result with
+     | Ok p ->
+       fetched_excludes := p;
+       excludes_ok := true
+     | Error _ -> ());
+    pending := !pending - 1;
+    finish_init ();
+    Lwt.return_unit);
 
-  send_command Status ()
-    ~on_response:(fun result ->
-      (match result with
-       | Ok info ->
-         connected_tenants :=
-           Set.of_list (module String) info.registered_tenants
-       | Error _ -> ());
-      pending := !pending - 1;
-      finish_init ())
+  Lwt.async (fun () ->
+    let* result = call Status () in
+    (match result with
+     | Ok info ->
+       state :=
+         { !state with
+           connected_tenants = Set.of_list (module String) info.registered_tenants
+         }
+     | Error _ -> ());
+    pending := !pending - 1;
+    finish_init ();
+    Lwt.return_unit)
 
 (* -- History import -- *)
 
@@ -656,18 +681,19 @@ let import_history () =
       let entry_list = !entries in
       Page_util.set_text import_msg
         (Printf.sprintf "Importing %d entries…" (List.length entry_list));
-      send_command Import_history entry_list
-        ~on_response:(fun result ->
-          Page_util.set_disabled import_btn false;
-          match result with
-          | Ok count ->
-            Page_util.set_text import_msg
-              (Printf.sprintf "Imported %d entries." count);
-            Page_util.set_class import_msg "msg success"
-          | Error msg ->
-            Page_util.set_text import_msg
-              (Printf.sprintf "Error: %s" msg);
-            Page_util.set_class import_msg "msg error")
+      Lwt.async (fun () ->
+        let* result = call Import_history entry_list in
+        Page_util.set_disabled import_btn false;
+        (match result with
+         | Ok count ->
+           Page_util.set_text import_msg
+             (Printf.sprintf "Imported %d entries." count);
+           Page_util.set_class import_msg "msg success"
+         | Error msg ->
+           Page_util.set_text import_msg
+             (Printf.sprintf "Error: %s" msg);
+           Page_util.set_class import_msg "msg error");
+        Lwt.return_unit)
   in
   Chrome_api.History.search ~max_results:100000
     ~f:(fun ~url ~title ~last_visit_time:_ ->
@@ -724,9 +750,8 @@ let () =
 let () =
   Page_util.connect_port
     ~on_ready:(fun conn ->
-      conn_ref := Some conn;
+      state := { !state with conn = Some conn };
       fetch_config ())
     ~on_disconnect:(fun () ->
-      conn_ref := None;
+      state := { !state with conn = None };
       set_status false)
-    ~on_event:(fun _p -> ())
