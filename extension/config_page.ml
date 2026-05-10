@@ -34,6 +34,7 @@ let config : Protocol.config ref =
       tenants = [];
       defaults =
         { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
+      history_exclude_patterns = [];
     }
 
 let connected_tenants : Set.M(String).t ref =

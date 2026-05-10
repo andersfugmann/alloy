@@ -53,6 +53,7 @@ type config = {
   allowed_networks : Cidr.t list; [@default []]
   tenants : tenants; [@default []]
   defaults : defaults;
+  history_exclude_patterns : string list; [@default []]
 }
 [@@deriving yojson { strict = false }]
 
@@ -87,6 +88,11 @@ type open_request = {
   title : string option; [@default None]
 } [@@deriving yojson]
 
+type page_loaded_request = {
+  url : string;
+  title : string option; [@default None]
+} [@@deriving yojson]
+
 type open_on_request = {
   target : string;
   url : string;
@@ -100,14 +106,25 @@ type connection_info = { tenant_id : string } [@@deriving yojson]
 type history_entry = {
   url : string;
   title : string;
-  timestamp : float;
+  visits : int list;
 } [@@deriving yojson]
 
 (* -- Lookup request *)
 
-type lookup_request = { query : string } [@@deriving yojson]
+type search_scope = Url | Title | Both [@@deriving yojson]
 
-type history = history_entry list [@@deriving yojson]
+type lookup_request = {
+  query : string;
+  scope : search_scope;
+  max_results : int;
+} [@@deriving yojson]
+
+type lookup_result = {
+  entry : history_entry;
+  matches : int;
+} [@@deriving yojson]
+
+type lookup_results = lookup_result list [@@deriving yojson]
 
 (* -- GADT command type *)
 
@@ -122,7 +139,8 @@ type (_, _) command =
   | Set_rules : (rule list, unit) command
   | Status : (unit, status_info) command
   | Connection_info : (unit, connection_info) command
-  | Lookup : (lookup_request, history_entry list) command
+  | Page_loaded : (page_loaded_request, unit) command
+  | Lookup : (lookup_request, lookup_result list) command
 
 let parse_json_string s =
   match Yojson.Safe.from_string s with
@@ -189,6 +207,7 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Set_rules -> "set_rules"
   | Status -> "status"
   | Connection_info -> "connection_info"
+  | Page_loaded -> "page_loaded"
   | Lookup -> "lookup"
 
 let command_codec : type req resp. (req, resp) command ->
@@ -228,9 +247,12 @@ let command_codec : type req resp. (req, resp) command ->
   | Connection_info ->
     (((fun () -> `Null), connection_info_of_yojson),
      ((fun _ -> Ok ()), connection_info_to_yojson))
+  | Page_loaded ->
+    ((page_loaded_request_to_yojson, (fun _ -> Ok ())),
+     (page_loaded_request_of_yojson, (fun () -> `Null)))
   | Lookup ->
-    ((lookup_request_to_yojson, history_of_yojson),
-     (lookup_request_of_yojson, history_to_yojson))
+    ((lookup_request_to_yojson, lookup_results_of_yojson),
+     (lookup_request_of_yojson, lookup_results_to_yojson))
 
 let request_serializer cmd = fst (fst (command_codec cmd))
 let response_deserializer cmd = snd (fst (command_codec cmd))

@@ -37,6 +37,7 @@ type state = {
   start_time : float;
   history : Protocol.history_entry list;
   history_path : string;
+  compiled_excludes : Re.re list;
 }
 
 (* Try to push a message to a tenant connection.
@@ -88,6 +89,7 @@ let default_config () : Protocol.config =
       { unmatched = "local";
         cooldown_seconds = Constants.default_cooldown_seconds;
         browser_launch_timeout = Constants.default_browser_launch_timeout };
+    history_exclude_patterns = [];
   }
 
 (* -- Config loading / saving *)
@@ -367,8 +369,22 @@ let record_history state ~url ~title =
   History.save state.history_path history;
   { state with history }
 
+let handle_page_loaded (request : Protocol.page_loaded_request) env ~respond =
+  let url = request.url in
+  let is_excluded =
+    List.exists env.state.compiled_excludes ~f:(fun re -> Re.execp re url)
+  in
+  match is_excluded with
+  | true ->
+    respond (Ok ());
+    env.state
+  | false ->
+    let state = record_history env.state ~url ~title:request.title in
+    respond (Ok ());
+    state
+
 let handle_open (request : Protocol.open_request) env ~respond =
-  let state = record_history env.state ~url:request.url ~title:request.title in
+  let state = env.state in
   let url = request.url in
   let matched_target =
     find_matching_rule state.compiled_rules url
@@ -397,7 +413,7 @@ let handle_open (request : Protocol.open_request) env ~respond =
     state
 
 let handle_open_on (request : Protocol.open_on_request) env ~respond =
-  let state = record_history env.state ~url:request.url ~title:request.title in
+  let state = env.state in
   let (state, promise) = deliver_url state request.target request.url ~sw:env.sw ~clock:env.clock ~inbox:env.inbox in
   Eio.Fiber.fork ~sw:env.sw (fun () ->
     let result = Eio.Promise.await promise in
@@ -417,8 +433,17 @@ let handle_get_config _request env ~respond =
   respond (Ok env.state.config);
   env.state
 
+let compile_excludes patterns =
+  List.filter_map patterns ~f:(fun pattern ->
+    match compile_regex pattern with
+    | Ok re -> Some re
+    | Error msg ->
+      Eio.traceln "Warning: invalid history exclude pattern '%s': %s" pattern msg;
+      None)
+
 let handle_set_config config env ~respond =
-  let state = { env.state with config } in
+  let compiled_excludes = compile_excludes config.Protocol.history_exclude_patterns in
+  let state = { env.state with config; compiled_excludes } in
   let resp = try_save_config state in
   respond resp;
   (match resp with
@@ -451,7 +476,8 @@ let handle_connection_info _request env ~respond =
   env.state
 
 let handle_lookup (request : Protocol.lookup_request) env ~respond =
-  let results = History.lookup env.state.history ~query:request.query in
+  let results = History.lookup env.state.history
+    ~query:request.query ~scope:request.scope ~max_results:request.max_results in
   respond (Ok results);
   env.state
 
@@ -459,6 +485,7 @@ let handle_lookup (request : Protocol.lookup_request) env ~respond =
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "register" -> Ok (Handler { cmd = Register; handle = handle_register })
+  | "page_loaded" -> Ok (Handler { cmd = Page_loaded; handle = handle_page_loaded })
   | "open" -> Ok (Handler { cmd = Open; handle = handle_open })
   | "open_on" -> Ok (Handler { cmd = Open_on; handle = handle_open_on })
   | "test" -> Ok (Handler { cmd = Test; handle = handle_test })
@@ -538,7 +565,7 @@ let rec receive_requests ~tenant inbox connection reader =
     in
     match result with
     | Error msg ->
-      log "req[%s]: parse error: %s" (Option.value tenant ~default:"?") msg;
+      log "req[%s]: parse error: %s (raw: %s)" (Option.value tenant ~default:"?") msg line;
       receive_requests ~tenant inbox connection reader
     | Ok (frame, rp) ->
       let tenant_name =
@@ -655,6 +682,7 @@ let run config_path =
     let clock = Eio.Stdenv.clock env in
     let net = Eio.Stdenv.net env in
     let (config, rules, compiled_rules) = load_and_validate_config config_path in
+    let compiled_excludes = compile_excludes config.history_exclude_patterns in
     let history_path = history_path_of config_path in
     let history = History.load history_path in
     let initial_state =
@@ -663,6 +691,7 @@ let run config_path =
         config_path;
         rules;
         compiled_rules;
+        compiled_excludes;
         registry = Map.empty (module String);
         starting = [];
         cooldowns = [];
