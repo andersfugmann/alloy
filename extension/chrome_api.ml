@@ -5,8 +5,6 @@ open! Base
 open! Stdio
 open Js_of_ocaml
 
-(* TODO: Cleanup unused functions *)
-
 (* ── Internal unsafe primitives ──────────────────────────────────── *)
 
 let global : _ Js.t = Js.Unsafe.global
@@ -325,17 +323,6 @@ module Web_request = struct
       [| inject (Js.wrap_callback (fun (details : request_details Js.t) ->
              f (Js.to_string details##.url) details##.tabId details##.statusCode));
          inject filter |]
-end
-
-(* ── Side Panel ──────────────────────────────────────────────────── *)
-
-module Side_panel = struct
-  let side_panel () : _ Js.t = get chrome "sidePanel"
-
-  let set_options ~path =
-    call (side_panel ()) "setOptions"
-      [| inject (js_obj [ ("path", inject (Js.string path));
-                          ("enabled", inject Js._true) ]) |]
 end
 
 (* ── Navigator (browser brand detection) ─────────────────────────── *)

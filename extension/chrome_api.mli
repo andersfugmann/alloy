@@ -71,10 +71,6 @@ module Web_request : sig
   val on_completed : (string -> int -> int -> unit) -> unit
 end
 
-module Side_panel : sig
-  val set_options : path:string -> unit
-end
-
 module Navigator : sig
   val get_browser_brand : unit -> string
 end
