@@ -89,7 +89,17 @@ let default_config () : Protocol.config =
       { unmatched = "local";
         cooldown_seconds = Constants.default_cooldown_seconds;
         browser_launch_timeout = Constants.default_browser_launch_timeout };
-    history_exclude_patterns = [];
+    history_exclude_patterns = [
+      "^https?://www\\.google\\..*/search";
+      "^https?://www\\.bing\\.com/search";
+      "^https?://search\\.yahoo\\.com/search";
+      "^https?://duckduckgo\\.com/";
+      "^https?://www\\.baidu\\.com/s";
+      "^https?://yandex\\..*/search";
+      "^https?://search\\.brave\\.com/search";
+      "^https?://www\\.ecosia\\.org/search";
+      "^https?://www\\.startpage\\.com/";
+    ];
   }
 
 (* -- Config loading / saving *)
@@ -705,6 +715,18 @@ let run config_path =
     let compiled_excludes = compile_excludes config.history_exclude_patterns in
     let history_path = history_path_of config_path in
     let history = History.load history_path in
+    let history =
+      let filtered = List.filter history ~f:(fun entry ->
+        not (List.exists compiled_excludes ~f:(fun re -> Re.execp re entry.Protocol.url)))
+      in
+      match Int.equal (List.length filtered) (List.length history) with
+      | true -> history
+      | false ->
+        Eio.traceln "Pruned %d excluded entries from history"
+          (List.length history - List.length filtered);
+        History.save history_path filtered;
+        filtered
+    in
     let initial_state =
       {
         config;
