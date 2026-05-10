@@ -483,7 +483,11 @@ let handle_lookup (request : Protocol.lookup_request) env ~respond =
   env.state
 
 let handle_import_history entries env ~respond =
-  let history = History.merge env.state.history entries in
+  let filtered = List.filter entries ~f:(fun entry ->
+    not (List.exists env.state.compiled_excludes ~f:(fun re ->
+      Re.execp re entry.Protocol.url)))
+  in
+  let history = History.merge env.state.history filtered in
   History.save env.state.history_path history;
   respond (Ok (List.length history));
   { env.state with history }
