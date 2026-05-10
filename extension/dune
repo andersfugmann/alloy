@@ -31,8 +31,8 @@
   (pps js_of_ocaml-ppx)))
 
 (executables
- (names popup config_page options_page add_rule_page)
- (modules popup config_page options_page add_rule_page)
+ (names popup config_page options_page add_rule_page history_panel)
+ (modules popup config_page options_page add_rule_page history_panel)
  (modes js)
  (libraries chrome_api client page_util protocol constants js_of_ocaml lwt base stdio yojson)
  (js_of_ocaml
@@ -70,3 +70,9 @@
  (deps add_rule_page.bc.js)
  (action
   (copy add_rule_page.bc.js add_rule.js)))
+
+(rule
+ (target history_panel.js)
+ (deps history_panel.bc.js)
+ (action
+  (copy history_panel.bc.js history_panel.js)))
