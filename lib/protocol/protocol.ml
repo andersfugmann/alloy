@@ -117,6 +117,7 @@ type lookup_request = {
   query : string;
   scope : search_scope;
   max_results : int;
+  max_age_days : int option; [@default None]
 } [@@deriving yojson]
 
 type lookup_result = {
@@ -141,6 +142,7 @@ type (_, _) command =
   | Connection_info : (unit, connection_info) command
   | Page_loaded : (page_loaded_request, unit) command
   | Lookup : (lookup_request, lookup_result list) command
+  | Import_history : (history_entry list, int) command
 
 let parse_json_string s =
   match Yojson.Safe.from_string s with
@@ -209,6 +211,7 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Connection_info -> "connection_info"
   | Page_loaded -> "page_loaded"
   | Lookup -> "lookup"
+  | Import_history -> "import_history"
 
 let command_codec : type req resp. (req, resp) command ->
   ((req -> Yojson.Safe.t) * (Yojson.Safe.t -> (resp, string) Result.t)) *
@@ -253,6 +256,21 @@ let command_codec : type req resp. (req, resp) command ->
   | Lookup ->
     ((lookup_request_to_yojson, lookup_results_of_yojson),
      (lookup_request_of_yojson, lookup_results_to_yojson))
+  | Import_history ->
+    let entries_to_yojson entries =
+      `List (List.map entries ~f:history_entry_to_yojson)
+    in
+    let entries_of_yojson = function
+      | `List items ->
+        List.map items ~f:history_entry_of_yojson |> Result.all
+      | _ -> Error "import_history: expected list"
+    in
+    let int_of_yojson = function
+      | `Int n -> Ok n
+      | _ -> Error "import_history: expected int"
+    in
+    ((entries_to_yojson, int_of_yojson),
+     (entries_of_yojson, (fun n -> `Int n)))
 
 let request_serializer cmd = fst (fst (command_codec cmd))
 let response_deserializer cmd = snd (fst (command_codec cmd))

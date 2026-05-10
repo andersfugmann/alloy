@@ -477,9 +477,16 @@ let handle_connection_info _request env ~respond =
 
 let handle_lookup (request : Protocol.lookup_request) env ~respond =
   let results = History.lookup env.state.history
-    ~query:request.query ~scope:request.scope ~max_results:request.max_results in
+    ~query:request.query ~scope:request.scope ~max_results:request.max_results
+    ~max_age_days:request.max_age_days in
   respond (Ok results);
   env.state
+
+let handle_import_history entries env ~respond =
+  let history = History.merge env.state.history entries in
+  History.save env.state.history_path history;
+  respond (Ok (List.length history));
+  { env.state with history }
 
 (* -- Command lookup: single match on string → handler bundle *)
 
@@ -496,6 +503,7 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "status" -> Ok (Handler { cmd = Status; handle = handle_status })
   | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = handle_connection_info })
   | "lookup" -> Ok (Handler { cmd = Lookup; handle = handle_lookup })
+  | "import_history" -> Ok (Handler { cmd = Import_history; handle = handle_import_history })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)

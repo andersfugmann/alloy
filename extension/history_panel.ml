@@ -101,7 +101,7 @@ let do_search conn =
   | false ->
     Lwt.async (fun () ->
       let scope = get_scope () in
-      let* result = Client.call conn Lookup { query; scope; max_results = 100 } in
+      let* result = Client.call conn Lookup { query; scope; max_results = 100; max_age_days = None } in
       begin match result with
       | Ok results ->
         cached_results := results;
