@@ -4,11 +4,13 @@
 function createMock() {
   const listeners = {
     onBeforeNavigate: [],
+    onNavigationCompleted: [],
     onContextMenuClicked: [],
     onInstalled: [],
     onStartup: [],
     onMessage: [],
     onConnect: [],
+    onRequestCompleted: [],
   };
 
   const ports = [];
@@ -27,11 +29,11 @@ function createMock() {
           }, 0);
           return;
         }
-        // Auto-respond with Registered push when Register frame is received
-        if (msg && msg.id === 0 && msg.payload && msg.payload.command === "register") {
+        // Auto-respond with Registered notification when Register frame is received
+        if (msg && msg.correlation_id === 0 && msg.payload && msg.payload.command === "register") {
           setTimeout(() => {
             msgListeners.forEach((cb) =>
-              cb({ id: 0, tenant: "", payload: ["Registered", { tenant_id: "test_tenant" }] })
+              cb({ correlation_id: 0, payload: ["Registered", "test_tenant"] })
             );
           }, 0);
         }
@@ -80,6 +82,14 @@ function createMock() {
     webNavigation: {
       onBeforeNavigate: {
         addListener: jest.fn((cb) => listeners.onBeforeNavigate.push(cb)),
+      },
+      onCompleted: {
+        addListener: jest.fn((cb) => listeners.onNavigationCompleted.push(cb)),
+      },
+    },
+    webRequest: {
+      onCompleted: {
+        addListener: jest.fn((cb, _filter) => listeners.onRequestCompleted.push(cb)),
       },
     },
     contextMenus: {
