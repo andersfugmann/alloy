@@ -438,7 +438,34 @@ let render_defaults () =
     Js.string (Int.to_string d.cooldown_seconds);
   (Page_util.input_by_id "dfTimeout")##.value :=
     Js.string (Int.to_string d.browser_launch_timeout);
-  populate_tenant_selects ()
+  populate_tenant_selects ();
+  let textarea = Page_util.get_by_id "excludePatterns" in
+  let text = String.concat ~sep:"\n" !config.history_exclude_patterns in
+  (Js.Unsafe.coerce textarea)##.value := Js.string text;
+  Page_util.set_text (Page_util.get_by_id "excludeError") ""
+
+let read_excludes () =
+  let textarea = Page_util.get_by_id "excludePatterns" in
+  let text = Js.to_string (Js.Unsafe.coerce textarea)##.value in
+  let patterns =
+    String.split_lines text
+    |> List.map ~f:String.strip
+    |> List.filter ~f:(fun s -> not (String.is_empty s))
+  in
+  let errors =
+    List.filter_map patterns ~f:(fun p ->
+      match Page_util.validate_regexp p with
+      | Ok () -> None
+      | Error msg -> Some (Printf.sprintf "%s: %s" p msg))
+  in
+  let error_el = Page_util.get_by_id "excludeError" in
+  match errors with
+  | [] ->
+    Page_util.set_text error_el "";
+    Some patterns
+  | _ ->
+    Page_util.set_text error_el (String.concat ~sep:"\n" errors);
+    None
 
 let read_defaults () =
   let cooldown =
@@ -463,12 +490,17 @@ let read_defaults () =
 
 let save_config () =
   read_defaults ();
-  show_msg "Saving\u{2026}" "";
-  send_command Set_config !config
-    ~on_response:(fun result ->
-      match result with
-      | Ok () -> show_msg "Configuration saved." "success"
-      | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
+  match read_excludes () with
+  | None ->
+    show_msg "Fix invalid exclude patterns before saving." "error"
+  | Some patterns ->
+    config := { !config with history_exclude_patterns = patterns };
+    show_msg "Saving\u{2026}" "";
+    send_command Set_config !config
+      ~on_response:(fun result ->
+        match result with
+        | Ok () -> show_msg "Configuration saved." "success"
+        | Error msg -> show_msg (Printf.sprintf "Error: %s" msg) "error")
 
 (* -- Fetch config + status -- *)
 

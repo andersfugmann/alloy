@@ -416,6 +416,13 @@
           <h2>History</h2>
         </div>
         <div class="card-body padded">
+          <div class="form-group" style="margin-bottom:12px">
+            <label>Exclude URL patterns (one regex per line)</label>
+            <textarea id="excludePatterns" rows="6"
+              style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;font-family:'SF Mono','Consolas',monospace;resize:vertical"
+              placeholder="^https?://www\.google\..*/search&#10;^https?://duckduckgo\.com/"></textarea>
+            <span id="excludeError" style="font-size:12px;color:var(--danger)"></span>
+          </div>
           <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
             Import your browser's browsing history into Alloy. Repeated imports are safe — visits are merged without duplicates.
           </p>
