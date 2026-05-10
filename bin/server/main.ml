@@ -37,6 +37,7 @@ type state = {
   start_time : float;
   history : Protocol.history_entry list;
   history_path : string;
+  exclude_patterns : string list;
   compiled_excludes : Re.re list;
 }
 
@@ -89,18 +90,19 @@ let default_config () : Protocol.config =
       { unmatched = "local";
         cooldown_seconds = Constants.default_cooldown_seconds;
         browser_launch_timeout = Constants.default_browser_launch_timeout };
-    history_exclude_patterns = [
-      "^https?://www\\.google\\..*/search";
-      "^https?://www\\.bing\\.com/search";
-      "^https?://search\\.yahoo\\.com/search";
-      "^https?://duckduckgo\\.com/";
-      "^https?://www\\.baidu\\.com/s";
-      "^https?://yandex\\..*/search";
-      "^https?://search\\.brave\\.com/search";
-      "^https?://www\\.ecosia\\.org/search";
-      "^https?://www\\.startpage\\.com/";
-    ];
   }
+
+let default_exclude_patterns = [
+  "^https?://www\\.google\\..*/search";
+  "^https?://www\\.bing\\.com/search";
+  "^https?://search\\.yahoo\\.com/search";
+  "^https?://duckduckgo\\.com/";
+  "^https?://www\\.baidu\\.com/s";
+  "^https?://yandex\\..*/search";
+  "^https?://search\\.brave\\.com/search";
+  "^https?://www\\.ecosia\\.org/search";
+  "^https?://www\\.startpage\\.com/";
+]
 
 (* -- Config loading / saving *)
 
@@ -131,6 +133,30 @@ let rules_path_of config_path =
 let history_path_of config_path =
   Stdlib.Filename.dirname config_path ^ "/history.json"
 
+let excludes_path_of config_path =
+  Stdlib.Filename.dirname config_path ^ "/exclude_patterns.json"
+
+let save_excludes config_path patterns =
+  let path = excludes_path_of config_path in
+  mkdir_p (Stdlib.Filename.dirname path);
+  let json = Protocol.exclude_patterns_to_yojson patterns in
+  let content = Yojson.Safe.pretty_to_string json in
+  Out_channel.write_all path ~data:(content ^ "\n")
+
+let load_excludes config_path =
+  let path = excludes_path_of config_path in
+  match Stdlib.Sys.file_exists path with
+  | true ->
+    let content = In_channel.read_all path in
+    Result.bind (Protocol.parse_json_string content) ~f:Protocol.exclude_patterns_of_yojson
+  | false ->
+    log "no exclude patterns found, creating default at %s" path;
+    (try save_excludes config_path default_exclude_patterns
+     with exn ->
+       log "warning: could not write default exclude patterns: %s"
+         (Exn.to_string exn));
+    Ok default_exclude_patterns
+
 let save_rules config_path rules =
   let path = rules_path_of config_path in
   mkdir_p (Stdlib.Filename.dirname path);
@@ -158,6 +184,22 @@ let migrate_rules_from_config config_path json =
     | Error msg ->
       log "warning: could not parse rules from config: %s" msg
 
+let migrate_excludes_from_config config_path json =
+  let excludes_path = excludes_path_of config_path in
+  match Stdlib.Sys.file_exists excludes_path with
+  | true -> ()
+  | false ->
+    let excludes_json = Yojson.Safe.Util.member "history_exclude_patterns" json in
+    match excludes_json with
+    | `Null -> ()
+    | excludes_json ->
+      match Protocol.exclude_patterns_of_yojson excludes_json with
+      | Ok patterns ->
+        log "found history_exclude_patterns in config.json, migrating to exclude_patterns.json";
+        save_excludes config_path patterns
+      | Error msg ->
+        log "warning: could not parse exclude patterns from config: %s" msg
+
 let fill_config_defaults (config : Protocol.config) : Protocol.config =
   let listen =
     match config.listen with
@@ -177,6 +219,7 @@ let load_config path =
     let content = In_channel.read_all path in
     Result.bind (Protocol.parse_json_string content) ~f:(fun json ->
       migrate_rules_from_config path json;
+      migrate_excludes_from_config path json;
       match Protocol.config_of_yojson json with
       | Ok config ->
         let config = fill_config_defaults config in
@@ -308,6 +351,13 @@ let try_save_rules state =
     Ok ()
   with exn ->
     Error (Printf.sprintf "failed to save rules: %s" (Exn.to_string exn))
+
+let try_save_excludes state =
+  try
+    save_excludes state.config_path state.exclude_patterns;
+    Ok ()
+  with exn ->
+    Error (Printf.sprintf "failed to save exclude patterns: %s" (Exn.to_string exn))
 
 let broadcast_config (state : state) : state =
   let registered = Map.keys state.registry in
@@ -452,8 +502,7 @@ let compile_excludes patterns =
       None)
 
 let handle_set_config config env ~respond =
-  let compiled_excludes = compile_excludes config.Protocol.history_exclude_patterns in
-  let state = { env.state with config; compiled_excludes } in
+  let state = { env.state with config } in
   let resp = try_save_config state in
   respond resp;
   (match resp with
@@ -474,6 +523,17 @@ let handle_set_rules rules env ~respond =
     let resp = try_save_rules state in
     respond resp;
     state
+
+let handle_get_exclude_patterns _request env ~respond =
+  respond (Ok env.state.exclude_patterns);
+  env.state
+
+let handle_set_exclude_patterns patterns env ~respond =
+  let compiled_excludes = compile_excludes patterns in
+  let state = { env.state with exclude_patterns = patterns; compiled_excludes } in
+  let resp = try_save_excludes state in
+  respond resp;
+  state
 
 let handle_status _request env ~respond =
   let tenants = Map.keys env.state.registry in
@@ -526,6 +586,8 @@ let lookup_handler : string -> (packed_handler, string) Result.t = function
   | "lookup" -> Ok (Handler { cmd = Lookup; handle = handle_lookup })
   | "import_history" -> Ok (Handler { cmd = Import_history; handle = handle_import_history })
   | "delete_history" -> Ok (Handler { cmd = Delete_history; handle = handle_delete_history })
+  | "get_exclude_patterns" -> Ok (Handler { cmd = Get_exclude_patterns; handle = handle_get_exclude_patterns })
+  | "set_exclude_patterns" -> Ok (Handler { cmd = Set_exclude_patterns; handle = handle_set_exclude_patterns })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)
@@ -712,7 +774,12 @@ let run config_path =
     let clock = Eio.Stdenv.clock env in
     let net = Eio.Stdenv.net env in
     let (config, rules, compiled_rules) = load_and_validate_config config_path in
-    let compiled_excludes = compile_excludes config.history_exclude_patterns in
+    let exclude_patterns =
+      match load_excludes config_path with
+      | Ok p -> p
+      | Error msg -> failwith (Printf.sprintf "failed to load exclude patterns: %s" msg)
+    in
+    let compiled_excludes = compile_excludes exclude_patterns in
     let history_path = history_path_of config_path in
     let history = History.load history_path in
     let history =
@@ -733,6 +800,7 @@ let run config_path =
         config_path;
         rules;
         compiled_rules;
+        exclude_patterns;
         compiled_excludes;
         registry = Map.empty (module String);
         starting = [];

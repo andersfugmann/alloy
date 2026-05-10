@@ -34,8 +34,9 @@ let config : Protocol.config ref =
       tenants = [];
       defaults =
         { unmatched = "local"; cooldown_seconds = 5; browser_launch_timeout = 10 };
-      history_exclude_patterns = [];
     }
+
+let exclude_patterns : string list ref = ref []
 
 let connected_tenants : Set.M(String).t ref =
   ref (Set.empty (module String))
@@ -445,8 +446,26 @@ let render_defaults () =
 
 (* -- Exclude pattern CRUD -- *)
 
-let rec render_excludes () =
-  let patterns = !config.history_exclude_patterns in
+let rec fetch_and_render_excludes () =
+  send_command Get_exclude_patterns ()
+    ~on_response:(fun result ->
+      match result with
+      | Ok p ->
+        exclude_patterns := p;
+        render_excludes ()
+      | Error msg ->
+        show_msg (Printf.sprintf "Failed to load exclude patterns: %s" msg) "error")
+
+and send_and_refetch_excludes updated =
+  send_command Set_exclude_patterns updated
+    ~on_response:(fun result ->
+      match result with
+      | Ok () -> fetch_and_render_excludes ()
+      | Error msg ->
+        show_msg (Printf.sprintf "Error saving exclude patterns: %s" msg) "error")
+
+and render_excludes () =
+  let patterns = !exclude_patterns in
   match List.is_empty patterns with
   | true ->
     Page_util.set_html exclude_list_el
@@ -478,11 +497,10 @@ let rec render_excludes () =
         let updated =
           List.filteri patterns ~f:(fun i _ -> not (Int.equal i idx))
         in
-        config := { !config with history_exclude_patterns = updated };
-        render_excludes ())
+        send_and_refetch_excludes updated)
 
 and edit_exclude idx =
-  match List.nth !config.history_exclude_patterns idx with
+  match List.nth !exclude_patterns idx with
   | None -> ()
   | Some p ->
     editing_exclude_index := Some idx;
@@ -501,17 +519,21 @@ and save_exclude () =
     | Error msg ->
       show_msg (Printf.sprintf "Invalid regex: %s" msg) "error"
     | Ok () ->
-      let patterns = !config.history_exclude_patterns in
-      let updated =
-        match !editing_exclude_index with
-        | Some idx ->
-          List.mapi patterns ~f:(fun i p ->
-            match Int.equal i idx with true -> pattern | false -> p)
-        | None -> patterns @ [ pattern ]
-      in
-      config := { !config with history_exclude_patterns = updated };
-      reset_exclude_form ();
-      render_excludes ()
+      send_command Get_exclude_patterns ()
+        ~on_response:(fun result ->
+          match result with
+          | Ok current ->
+            let updated =
+              match !editing_exclude_index with
+              | Some idx ->
+                List.mapi current ~f:(fun i p ->
+                  match Int.equal i idx with true -> pattern | false -> p)
+              | None -> current @ [ pattern ]
+            in
+            reset_exclude_form ();
+            send_and_refetch_excludes updated
+          | Error msg ->
+            show_msg (Printf.sprintf "Failed to fetch exclude patterns: %s" msg) "error")
 
 and reset_exclude_form () =
   editing_exclude_index := None;
@@ -552,16 +574,18 @@ let save_config () =
 (* -- Fetch config + status -- *)
 
 let fetch_config () =
-  let pending = ref 3 in
+  let pending = ref 4 in
   let config_ok = ref false in
   let rules_ok = ref false in
+  let excludes_ok = ref false in
   let fetched_rules = ref [] in
+  let fetched_excludes = ref [] in
 
   let finish_init () =
     match !pending > 0 with
     | true -> ()
     | false ->
-      (match !config_ok && !rules_ok with
+      (match !config_ok && !rules_ok && !excludes_ok with
        | false ->
          set_status false;
          Page_util.set_text loading_el "Failed to load configuration."
@@ -571,6 +595,7 @@ let fetch_config () =
          render_tenants ();
          render_rules !fetched_rules;
          render_defaults ();
+         exclude_patterns := !fetched_excludes;
          render_excludes ())
   in
 
@@ -591,6 +616,16 @@ let fetch_config () =
        | Ok r ->
          fetched_rules := r;
          rules_ok := true
+       | Error _ -> ());
+      pending := !pending - 1;
+      finish_init ());
+
+  send_command Get_exclude_patterns ()
+    ~on_response:(fun result ->
+      (match result with
+       | Ok p ->
+         fetched_excludes := p;
+         excludes_ok := true
        | Error _ -> ());
       pending := !pending - 1;
       finish_init ());

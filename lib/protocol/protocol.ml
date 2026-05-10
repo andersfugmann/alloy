@@ -53,9 +53,21 @@ type config = {
   allowed_networks : Cidr.t list; [@default []]
   tenants : tenants; [@default []]
   defaults : defaults;
-  history_exclude_patterns : string list; [@default []]
 }
 [@@deriving yojson { strict = false }]
+
+type exclude_patterns = string list
+
+let exclude_patterns_to_yojson patterns =
+  `List (List.map patterns ~f:(fun s -> `String s))
+
+let exclude_patterns_of_yojson = function
+  | `List items ->
+    List.map items ~f:(function
+      | `String s -> Ok s
+      | _ -> Error "exclude_patterns: expected string")
+    |> Result.all
+  | _ -> Error "exclude_patterns: expected list"
 
 type status_info = {
   registered_tenants : tenant_id list;
@@ -144,6 +156,8 @@ type (_, _) command =
   | Lookup : (lookup_request, lookup_result list) command
   | Import_history : (history_entry list, int) command
   | Delete_history : (string list, int) command
+  | Get_exclude_patterns : (unit, string list) command
+  | Set_exclude_patterns : (string list, unit) command
 
 let parse_json_string s =
   match Yojson.Safe.from_string s with
@@ -214,6 +228,8 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Lookup -> "lookup"
   | Import_history -> "import_history"
   | Delete_history -> "delete_history"
+  | Get_exclude_patterns -> "get_exclude_patterns"
+  | Set_exclude_patterns -> "set_exclude_patterns"
 
 let command_codec : type req resp. (req, resp) command ->
   ((req -> Yojson.Safe.t) * (Yojson.Safe.t -> (resp, string) Result.t)) *
@@ -291,6 +307,23 @@ let command_codec : type req resp. (req, resp) command ->
     in
     ((urls_to_yojson, int_of_yojson),
      (urls_of_yojson, (fun n -> `Int n)))
+  | Get_exclude_patterns ->
+    (((fun () -> `Null), exclude_patterns_of_yojson),
+     ((fun _ -> Ok ()), exclude_patterns_to_yojson))
+  | Set_exclude_patterns ->
+    let patterns_of_yojson = function
+      | `List items ->
+        List.map items ~f:(function
+          | `String s -> Ok s
+          | _ -> Error "set_exclude_patterns: expected string")
+        |> Result.all
+      | _ -> Error "set_exclude_patterns: expected list"
+    in
+    let patterns_to_yojson patterns =
+      `List (List.map patterns ~f:(fun s -> `String s))
+    in
+    ((patterns_to_yojson, (fun _ -> Ok ())),
+     (patterns_of_yojson, (fun () -> `Null)))
 
 let request_serializer cmd = fst (fst (command_codec cmd))
 let response_deserializer cmd = snd (fst (command_codec cmd))
