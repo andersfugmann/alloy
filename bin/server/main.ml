@@ -476,9 +476,10 @@ let handle_connection_info _request env ~respond =
   env.state
 
 let handle_lookup (request : Protocol.lookup_request) env ~respond =
+  let today = Float.to_int (Unix.gettimeofday () /. 86400.) in
   let results = History.lookup env.state.history
     ~query:request.query ~scope:request.scope ~max_results:request.max_results
-    ~max_age_days:request.max_age_days in
+    ~max_age_days:request.max_age_days ~today in
   respond (Ok results);
   env.state
 
