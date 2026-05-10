@@ -19,6 +19,32 @@ let ctx_remove = Page_util.get_by_id "ctxRemove"
 let pending_delete_urls : string list ref = ref []
 let active_conn : Client.t option ref = ref None
 
+(* Keyboard navigation state *)
+let selected_index = ref (-1)
+let navigable_items : (string * Dom_html.element Js.t) list ref = ref []
+
+let clear_selection () =
+  match !selected_index >= 0 && !selected_index < List.length !navigable_items with
+  | true ->
+    let (_, el) = List.nth_exn !navigable_items !selected_index in
+    Page_util.remove_class el "selected";
+    selected_index := -1
+  | false ->
+    selected_index := -1
+
+let set_selection idx =
+  let len = List.length !navigable_items in
+  match len with
+  | 0 -> ()
+  | _ ->
+    clear_selection ();
+    let clamped = Int.max 0 (Int.min idx (len - 1)) in
+    let (_, el) = List.nth_exn !navigable_items clamped in
+    Page_util.add_class el "selected";
+    selected_index := clamped;
+    (Js.Unsafe.coerce el)##scrollIntoView
+      (Js.Unsafe.obj [| ("block", Js.Unsafe.inject (Js.string "nearest")) |])
+
 let hide_context_menu () =
   Page_util.set_display context_menu "none";
   pending_delete_urls := []
@@ -106,6 +132,8 @@ let visit_meta_text visits =
 let render_results results =
   Page_util.set_html results_list "";
   hide_context_menu ();
+  selected_index := -1;
+  navigable_items := [];
   let doc = Dom_html.document in
   let sort_mode = Js.to_string sort_select##.value in
   let sorted = sort_results sort_mode results in
@@ -230,13 +258,18 @@ let render_results results =
       on_context_menu (li :> Dom_html.element Js.t) all_urls;
       li
     in
+    let items_acc = ref [] in
     List.iter groups ~f:(fun (_, group) ->
-      let li =
+      let (url, li) =
         match group with
-        | [r] -> render_single r.entry
-        | rs -> render_group rs
+        | [r] -> (r.entry.url, render_single r.entry)
+        | rs ->
+          let first : Protocol.lookup_result = List.hd_exn rs in
+          (first.entry.url, render_group rs)
       in
+      items_acc := (url, (li :> Dom_html.element Js.t)) :: !items_acc;
       Dom.appendChild results_list li);
+    navigable_items := List.rev !items_acc;
     let group_count = List.length groups in
     let status_text =
       match Int.equal total_results group_count with
@@ -319,7 +352,34 @@ let () =
       let key = Js.Optdef.case ev##.key (fun () -> "") Js.to_string in
       match key with
       | "Escape" -> hide_context_menu (); Js._true
-      | _ -> Js._true))
+      | "ArrowDown" ->
+        Dom.preventDefault ev;
+        set_selection (!selected_index + 1);
+        Js._false
+      | "ArrowUp" ->
+        Dom.preventDefault ev;
+        begin match !selected_index > 0 with
+        | true -> set_selection (!selected_index - 1)
+        | false -> ()
+        end;
+        Js._false
+      | "Enter" ->
+        begin match !selected_index >= 0 && !selected_index < List.length !navigable_items with
+        | true ->
+          Dom.preventDefault ev;
+          let (url, _) = List.nth_exn !navigable_items !selected_index in
+          Chrome_api.Tabs.create_url url
+        | false -> ()
+        end;
+        Js._true
+      | _ ->
+        begin match !selected_index >= 0 with
+        | true ->
+          clear_selection ();
+          search_input##focus
+        | false -> ()
+        end;
+        Js._true))
     Js._false);
   Page_util.connect_port
     ~on_ready:(fun conn ->
