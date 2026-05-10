@@ -37,6 +37,58 @@ let days_ago_text days =
   | 1 -> "yesterday"
   | n -> Printf.sprintf "%d days ago" n
 
+let path_of_url url =
+  match Page_util.url_origin url with
+  | Some origin ->
+    let path = String.drop_prefix url (String.length origin) in
+    begin match String.is_empty path with
+    | true -> "/"
+    | false -> path
+    end
+  | None -> url
+
+let display_domain url =
+  match Page_util.url_origin url with
+  | Some origin ->
+    begin match String.substr_index origin ~pattern:"://" with
+    | Some i -> String.drop_prefix origin (i + 3)
+    | None -> origin
+    end
+  | None -> url
+
+let group_key (r : Protocol.lookup_result) =
+  match String.is_empty r.entry.title with
+  | true -> None
+  | false ->
+    let domain = Page_util.url_origin r.entry.url |> Option.value ~default:"" in
+    Some (String.lowercase r.entry.title, String.lowercase domain)
+
+let equal_key a b =
+  match (a, b) with
+  | (Some (t1, d1), Some (t2, d2)) -> String.equal t1 t2 && String.equal d1 d2
+  | _ -> false
+
+let group_results results =
+  let rec insert k r = function
+    | [] -> [(k, [r])]
+    | (gk, rs) :: rest ->
+      begin match equal_key gk k with
+      | true -> (gk, rs @ [r]) :: rest
+      | false -> (gk, rs) :: insert k r rest
+      end
+  in
+  List.fold results ~init:[] ~f:(fun groups r -> insert (group_key r) r groups)
+
+let visit_meta_text visits =
+  let last_visit =
+    match List.hd visits with
+    | Some day -> days_ago_text (today () - day)
+    | None -> "no visits"
+  in
+  let count = List.length visits in
+  Printf.sprintf "%s · %d visit%s" last_visit count
+    (match count with 1 -> "" | _ -> "s")
+
 let render_results results =
   Page_util.set_html results_list "";
   let doc = Dom_html.document in
@@ -47,8 +99,9 @@ let render_results results =
     Page_util.set_html results_list
       {|<li class="empty-state">No results</li>|}
   | _ ->
-    List.iter sorted ~f:(fun (r : Protocol.lookup_result) ->
-      let entry = r.entry in
+    let groups = group_results sorted in
+    let total_results = List.length sorted in
+    let render_single (entry : Protocol.history_entry) =
       let li = Dom_html.createLi doc in
       let title_div = Dom_html.createDiv doc in
       Page_util.set_class (title_div :> Dom_html.element Js.t) "result-title";
@@ -65,23 +118,108 @@ let render_results results =
       Dom.appendChild li url_div;
       let meta_div = Dom_html.createDiv doc in
       Page_util.set_class (meta_div :> Dom_html.element Js.t) "result-meta";
-      let last_visit =
-        match List.hd entry.visits with
-        | Some day -> days_ago_text (today () - day)
-        | None -> "no visits"
-      in
-      let visit_count = List.length entry.visits in
       Page_util.set_text (meta_div :> Dom_html.element Js.t)
-        (Printf.sprintf "%s · %d visit%s" last_visit visit_count
-          (match visit_count with 1 -> "" | _ -> "s"));
+        (visit_meta_text entry.visits);
       Dom.appendChild li meta_div;
       Page_util.on_click (li :> Dom_html.element Js.t) (fun () ->
         Chrome_api.Tabs.create_url entry.url);
+      li
+    in
+    let render_group results =
+      let first : Protocol.lookup_result = List.hd_exn results in
+      let li = Dom_html.createLi doc in
+      Page_util.set_class (li :> Dom_html.element Js.t) "result-group";
+      let header = Dom_html.createDiv doc in
+      Page_util.set_class (header :> Dom_html.element Js.t) "group-header";
+      let toggle = Dom_html.createSpan doc in
+      Page_util.set_class (toggle :> Dom_html.element Js.t) "group-toggle";
+      Page_util.set_text (toggle :> Dom_html.element Js.t) "▸";
+      Dom.appendChild header toggle;
+      let info = Dom_html.createDiv doc in
+      Page_util.set_class (info :> Dom_html.element Js.t) "group-info";
+      let title_div = Dom_html.createDiv doc in
+      Page_util.set_class (title_div :> Dom_html.element Js.t) "result-title";
+      Page_util.set_text (title_div :> Dom_html.element Js.t) first.entry.title;
+      Dom.appendChild info title_div;
+      let url_div = Dom_html.createDiv doc in
+      Page_util.set_class (url_div :> Dom_html.element Js.t) "result-url";
+      let domain = display_domain first.entry.url in
+      let count = List.length results in
+      Page_util.set_text (url_div :> Dom_html.element Js.t)
+        (Printf.sprintf "%s · %d page%s" domain count
+          (match count with 1 -> "" | _ -> "s"));
+      Dom.appendChild info url_div;
+      let meta_div = Dom_html.createDiv doc in
+      Page_util.set_class (meta_div :> Dom_html.element Js.t) "result-meta";
+      let most_recent =
+        List.filter_map results ~f:(fun r -> List.hd r.entry.visits)
+        |> List.max_elt ~compare:Int.compare
+      in
+      let total_visits =
+        List.sum (module Int) results ~f:(fun r -> List.length r.entry.visits)
+      in
+      let last_text =
+        match most_recent with
+        | Some day -> days_ago_text (today () - day)
+        | None -> "no visits"
+      in
+      Page_util.set_text (meta_div :> Dom_html.element Js.t)
+        (Printf.sprintf "%s · %d visit%s total" last_text total_visits
+          (match total_visits with 1 -> "" | _ -> "s"));
+      Dom.appendChild info meta_div;
+      Dom.appendChild header info;
+      Dom.appendChild li header;
+      let children_ul = Dom_html.createUl doc in
+      Page_util.set_class (children_ul :> Dom_html.element Js.t) "group-children";
+      Page_util.set_display (children_ul :> Dom_html.element Js.t) "none";
+      List.iter results ~f:(fun (r : Protocol.lookup_result) ->
+        let child_li = Dom_html.createLi doc in
+        let path_div = Dom_html.createDiv doc in
+        Page_util.set_class (path_div :> Dom_html.element Js.t) "result-url";
+        Page_util.set_text (path_div :> Dom_html.element Js.t)
+          (path_of_url r.entry.url);
+        Dom.appendChild child_li path_div;
+        let child_meta = Dom_html.createDiv doc in
+        Page_util.set_class (child_meta :> Dom_html.element Js.t) "result-meta";
+        Page_util.set_text (child_meta :> Dom_html.element Js.t)
+          (visit_meta_text r.entry.visits);
+        Dom.appendChild child_li child_meta;
+        Page_util.on_click (child_li :> Dom_html.element Js.t) (fun () ->
+          Chrome_api.Tabs.create_url r.entry.url);
+        Dom.appendChild children_ul child_li);
+      Dom.appendChild li children_ul;
+      let expanded = ref false in
+      Page_util.on_click (header :> Dom_html.element Js.t) (fun () ->
+        expanded := not !expanded;
+        match !expanded with
+        | true ->
+          Page_util.set_display (children_ul :> Dom_html.element Js.t) "block";
+          Page_util.set_text (toggle :> Dom_html.element Js.t) "▾"
+        | false ->
+          Page_util.set_display (children_ul :> Dom_html.element Js.t) "none";
+          Page_util.set_text (toggle :> Dom_html.element Js.t) "▸");
+      li
+    in
+    List.iter groups ~f:(fun (_, group) ->
+      let li =
+        match group with
+        | [r] -> render_single r.entry
+        | rs -> render_group rs
+      in
       Dom.appendChild results_list li);
-  let n = List.length sorted in
-  Page_util.set_text status_el
-    (Printf.sprintf "%d result%s" n
-      (match n with 1 -> "" | _ -> "s"))
+    let group_count = List.length groups in
+    let status_text =
+      match Int.equal total_results group_count with
+      | true ->
+        Printf.sprintf "%d result%s" total_results
+          (match total_results with 1 -> "" | _ -> "s")
+      | false ->
+        Printf.sprintf "%d result%s · %d group%s" total_results
+          (match total_results with 1 -> "" | _ -> "s")
+          group_count
+          (match group_count with 1 -> "" | _ -> "s")
+    in
+    Page_util.set_text status_el status_text
 
 let get_max_age_days () =
   let v = Js.to_string max_age_select##.value in
