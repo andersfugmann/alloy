@@ -214,4 +214,3 @@ let () =
         Page_util.create_tab (Page_util.get_extension_url "config.html");
         Dom_html.window##close))
     ~on_disconnect:show_disconnected
-    ~on_event:(fun _p -> ())

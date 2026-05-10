@@ -110,4 +110,3 @@ let () =
                 end)))
     ~on_disconnect:(fun () ->
       Page_util.set_text error_div "Disconnected")
-    ~on_event:(fun _p -> ())

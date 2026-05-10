@@ -59,10 +59,14 @@ type handler_env = {
   inbox : coordinator_msg Eio.Stream.t;
 }
 
+and ('req, 'resp) handler =
+  | Sync of ('req -> handler_env -> ('resp, string) Result.t * state)
+  | Async of ('req -> handler_env -> respond:(('resp, string) Result.t -> unit) -> state)
+
 and packed_handler =
   | Handler : {
       cmd : ('req, 'resp) Protocol.command;
-      handle : 'req -> handler_env -> respond:(('resp, string) Result.t -> unit) -> state;
+      handle : ('req, 'resp) handler;
     } -> packed_handler
 
 and coordinator_action =
@@ -339,26 +343,18 @@ let deliver_url state target url ~sw ~clock ~inbox =
 
 (* -- State helpers *)
 
+let try_save label f =
+  try f (); Ok ()
+  with exn -> Error (Printf.sprintf "failed to save %s: %s" label (Exn.to_string exn))
+
 let try_save_config state =
-  try
-    save_config_to_path state.config_path state.config;
-    Ok ()
-  with exn ->
-    Error (Printf.sprintf "failed to save config: %s" (Exn.to_string exn))
+  try_save "config" (fun () -> save_config_to_path state.config_path state.config)
 
 let try_save_rules state =
-  try
-    save_rules state.config_path state.rules;
-    Ok ()
-  with exn ->
-    Error (Printf.sprintf "failed to save rules: %s" (Exn.to_string exn))
+  try_save "rules" (fun () -> save_rules state.config_path state.rules)
 
 let try_save_excludes state =
-  try
-    save_excludes state.config_path state.exclude_patterns;
-    Ok ()
-  with exn ->
-    Error (Printf.sprintf "failed to save exclude patterns: %s" (Exn.to_string exn))
+  try_save "exclude patterns" (fun () -> save_excludes state.config_path state.exclude_patterns)
 
 let broadcast_config (state : state) : state =
   let registered = Map.keys state.registry in
@@ -430,19 +426,14 @@ let record_history state ~url ~title =
   History.save state.history_path history;
   { state with history }
 
-let handle_page_loaded (request : Protocol.page_loaded_request) env ~respond =
+let handle_page_loaded (request : Protocol.page_loaded_request) env =
   let url = request.url in
   let is_excluded =
     List.exists env.state.compiled_excludes ~f:(fun re -> Re.execp re url)
   in
   match is_excluded with
-  | true ->
-    respond (Ok ());
-    env.state
-  | false ->
-    let state = record_history env.state ~url ~title:request.title in
-    respond (Ok ());
-    state
+  | true -> (Ok (), env.state)
+  | false -> (Ok (), record_history env.state ~url ~title:request.title)
 
 let handle_open (request : Protocol.open_request) env ~respond =
   let state = env.state in
@@ -481,18 +472,16 @@ let handle_open_on (request : Protocol.open_on_request) env ~respond =
     respond result);
   state
 
-let handle_test (request : Protocol.open_request) env ~respond =
+let handle_test (request : Protocol.open_request) env =
   let result =
     match find_matching_rule env.state.compiled_rules request.url with
     | Some (target, idx) -> Protocol.Match { tenant = target; rule_index = idx }
     | None -> Protocol.No_match { default_tenant = env.state.config.defaults.unmatched }
   in
-  respond (Ok result);
-  env.state
+  (Ok result, env.state)
 
-let handle_get_config _request env ~respond =
-  respond (Ok env.state.config);
-  env.state
+let handle_get_config _request env =
+  (Ok env.state.config, env.state)
 
 let compile_excludes patterns =
   List.filter_map patterns ~f:(fun pattern ->
@@ -502,93 +491,79 @@ let compile_excludes patterns =
       Eio.traceln "Warning: invalid history exclude pattern '%s': %s" pattern msg;
       None)
 
-let handle_set_config config env ~respond =
+let handle_set_config config env =
   let state = { env.state with config } in
   let resp = try_save_config state in
-  respond resp;
-  (match resp with
-   | Ok () -> broadcast_config state
-   | Error _ -> state)
+  match resp with
+  | Ok () -> (resp, broadcast_config state)
+  | Error _ -> (resp, state)
 
-let handle_get_rules _request env ~respond =
-  respond (Ok env.state.rules);
-  env.state
+let handle_get_rules _request env =
+  (Ok env.state.rules, env.state)
 
-let handle_set_rules rules env ~respond =
+let handle_set_rules rules env =
   match compile_rules rules with
-  | Error msg ->
-    respond (Error (Printf.sprintf "invalid rules: %s" msg));
-    env.state
+  | Error msg -> (Error (Printf.sprintf "invalid rules: %s" msg), env.state)
   | Ok compiled_rules ->
     let state = { env.state with rules; compiled_rules } in
-    let resp = try_save_rules state in
-    respond resp;
-    state
+    (try_save_rules state, state)
 
-let handle_get_exclude_patterns _request env ~respond =
-  respond (Ok env.state.exclude_patterns);
-  env.state
+let handle_get_exclude_patterns _request env =
+  (Ok env.state.exclude_patterns, env.state)
 
-let handle_set_exclude_patterns patterns env ~respond =
+let handle_set_exclude_patterns patterns env =
   let compiled_excludes = compile_excludes patterns in
   let state = { env.state with exclude_patterns = patterns; compiled_excludes } in
-  let resp = try_save_excludes state in
-  respond resp;
-  state
+  (try_save_excludes state, state)
 
-let handle_status _request env ~respond =
+let handle_status _request env =
   let tenants = Map.keys env.state.registry in
   let uptime = Unix.gettimeofday () -. env.state.start_time |> Float.to_int in
-  respond (Ok { Protocol.registered_tenants = tenants; uptime_seconds = uptime });
-  env.state
+  (Ok { Protocol.registered_tenants = tenants; uptime_seconds = uptime }, env.state)
 
-let handle_connection_info _request env ~respond =
-  respond (Ok { Protocol.tenant_id = env.tenant });
-  env.state
+let handle_connection_info _request env =
+  (Ok { Protocol.tenant_id = env.tenant }, env.state)
 
-let handle_lookup (request : Protocol.lookup_request) env ~respond =
+let handle_lookup (request : Protocol.lookup_request) env =
   let today = Float.to_int (Unix.gettimeofday () /. 86400.) in
   let results = History.lookup env.state.history
     ~query:request.query ~scope:request.scope ~max_results:request.max_results
     ~max_age_days:request.max_age_days ~today in
-  respond (Ok results);
-  env.state
+  (Ok results, env.state)
 
-let handle_import_history entries env ~respond =
+let handle_import_history entries env =
   let filtered = List.filter entries ~f:(fun entry ->
     not (List.exists env.state.compiled_excludes ~f:(fun re ->
       Re.execp re entry.Protocol.url)))
   in
   let history = History.merge env.state.history filtered in
   History.save env.state.history_path history;
-  respond (Ok (List.length history));
-  { env.state with history }
+  (Ok (List.length history), { env.state with history })
 
-let handle_delete_history urls env ~respond =
+let handle_delete_history urls env =
   let history = History.delete env.state.history ~urls in
   History.save env.state.history_path history;
-  respond (Ok (List.length history));
-  { env.state with history }
+  (Ok (List.length history), { env.state with history })
 
 (* -- Command lookup: single match on string → handler bundle *)
 
 let lookup_handler : string -> (packed_handler, string) Result.t = function
-  | "register" -> Ok (Handler { cmd = Register; handle = handle_register })
-  | "page_loaded" -> Ok (Handler { cmd = Page_loaded; handle = handle_page_loaded })
-  | "open" -> Ok (Handler { cmd = Open; handle = handle_open })
-  | "open_on" -> Ok (Handler { cmd = Open_on; handle = handle_open_on })
-  | "test" -> Ok (Handler { cmd = Test; handle = handle_test })
-  | "get_config" -> Ok (Handler { cmd = Get_config; handle = handle_get_config })
-  | "set_config" -> Ok (Handler { cmd = Set_config; handle = handle_set_config })
-  | "get_rules" -> Ok (Handler { cmd = Get_rules; handle = handle_get_rules })
-  | "set_rules" -> Ok (Handler { cmd = Set_rules; handle = handle_set_rules })
-  | "status" -> Ok (Handler { cmd = Status; handle = handle_status })
-  | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = handle_connection_info })
-  | "lookup" -> Ok (Handler { cmd = Lookup; handle = handle_lookup })
-  | "import_history" -> Ok (Handler { cmd = Import_history; handle = handle_import_history })
-  | "delete_history" -> Ok (Handler { cmd = Delete_history; handle = handle_delete_history })
-  | "get_exclude_patterns" -> Ok (Handler { cmd = Get_exclude_patterns; handle = handle_get_exclude_patterns })
-  | "set_exclude_patterns" -> Ok (Handler { cmd = Set_exclude_patterns; handle = handle_set_exclude_patterns })
+  | "register" -> Ok (Handler { cmd = Register; handle = Async handle_register })
+  | "page_loaded" -> Ok (Handler { cmd = Page_loaded; handle = Sync handle_page_loaded })
+  | "open" -> Ok (Handler { cmd = Open; handle = Async handle_open })
+  | "open_on" -> Ok (Handler { cmd = Open_on; handle = Async handle_open_on })
+  | "test" -> Ok (Handler { cmd = Test; handle = Sync handle_test })
+  | "get_config" -> Ok (Handler { cmd = Get_config; handle = Sync handle_get_config })
+  | "set_config" -> Ok (Handler { cmd = Set_config; handle = Sync handle_set_config })
+  | "get_rules" -> Ok (Handler { cmd = Get_rules; handle = Sync handle_get_rules })
+  | "set_rules" -> Ok (Handler { cmd = Set_rules; handle = Sync handle_set_rules })
+  | "status" -> Ok (Handler { cmd = Status; handle = Sync handle_status })
+  | "connection_info" -> Ok (Handler { cmd = Connection_info; handle = Sync handle_connection_info })
+  | "lookup" -> Ok (Handler { cmd = Lookup; handle = Sync handle_lookup })
+  | "import_history" -> Ok (Handler { cmd = Import_history; handle = Sync handle_import_history })
+  | "delete_history" -> Ok (Handler { cmd = Delete_history; handle = Sync handle_delete_history })
+  | "get_exclude_patterns" -> Ok (Handler { cmd = Get_exclude_patterns; handle = Sync handle_get_exclude_patterns })
+  | "set_exclude_patterns" -> Ok (Handler { cmd = Set_exclude_patterns; handle = Sync handle_set_exclude_patterns })
   | name -> Result.failf "unknown command: %s" name
 
 (* -- Response formatting *)
@@ -611,7 +586,13 @@ let execute_handler (Handler { cmd; handle }) request_json request_id env =
       let response = serialize_response request_id json_result in
       Eio.Stream.add env.connection.push_stream response
     in
-    handle request env ~respond
+    match handle with
+    | Sync f ->
+      let (result, state) = f request env in
+      respond result;
+      state
+    | Async f ->
+      f request env ~respond
 
 (* -- Coordinator loop *)
 

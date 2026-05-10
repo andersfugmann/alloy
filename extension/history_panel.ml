@@ -418,4 +418,3 @@ let () =
       cached_results := [];
       Page_util.set_html results_list "";
       Page_util.set_text status_el "Disconnected")
-    ~on_event:(fun _p -> ())

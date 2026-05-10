@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Alloy",
-  "version": "0.9.46",
+  "version": "0.9.53",
   "description": "Route URLs between browser profiles",
   "permissions": [
     "webNavigation",

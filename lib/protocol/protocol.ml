@@ -56,18 +56,9 @@ type config = {
 }
 [@@deriving yojson { strict = false }]
 
-type exclude_patterns = string list
-
-let exclude_patterns_to_yojson patterns =
-  `List (List.map patterns ~f:(fun s -> `String s))
-
-let exclude_patterns_of_yojson = function
-  | `List items ->
-    List.map items ~f:(function
-      | `String s -> Ok s
-      | _ -> Error "exclude_patterns: expected string")
-    |> Result.all
-  | _ -> Error "exclude_patterns: expected list"
+type exclude_patterns = string list [@@deriving yojson]
+type url_list = string list [@@deriving yojson]
+type count = int [@@deriving yojson]
 
 type status_info = {
   registered_tenants : tenant_id list;
@@ -120,6 +111,8 @@ type history_entry = {
   title : string;
   visits : int list;
 } [@@deriving yojson]
+
+type history_entries = history_entry list [@@deriving yojson]
 
 (* -- Lookup request *)
 
@@ -231,104 +224,117 @@ let command_name : type req resp. (req, resp) command -> string = function
   | Get_exclude_patterns -> "get_exclude_patterns"
   | Set_exclude_patterns -> "set_exclude_patterns"
 
-let command_codec : type req resp. (req, resp) command ->
-  ((req -> Yojson.Safe.t) * (Yojson.Safe.t -> (resp, string) Result.t)) *
-  ((Yojson.Safe.t -> (req, string) Result.t) * (resp -> Yojson.Safe.t)) = function
-  | Register ->
-    ((register_request_to_yojson,
-      (fun payload -> match payload with
-       | `String s -> Ok s
-       | _ -> Error "register: expected string")),
-     (register_request_of_yojson,
-      (fun s -> `String s)))
-  | Open ->
-    ((open_request_to_yojson, route_result_of_yojson),
-     (open_request_of_yojson, route_result_to_yojson))
-  | Open_on ->
-    ((open_on_request_to_yojson, route_result_of_yojson),
-     (open_on_request_of_yojson, route_result_to_yojson))
-  | Test ->
-    ((open_request_to_yojson, test_result_of_yojson),
-     (open_request_of_yojson, test_result_to_yojson))
-  | Get_config ->
-    (((fun () -> `Null), config_of_yojson),
-     ((fun _ -> Ok ()), config_to_yojson))
-  | Set_config ->
-    ((config_to_yojson, (fun _ -> Ok ())),
-     (config_of_yojson, (fun () -> `Null)))
-  | Get_rules ->
-    (((fun () -> `Null), rules_of_yojson),
-     ((fun _ -> Ok ()), rules_to_yojson))
-  | Set_rules ->
-    ((rules_to_yojson, (fun _ -> Ok ())),
-     (rules_of_yojson, (fun () -> `Null)))
-  | Status ->
-    (((fun () -> `Null), status_info_of_yojson),
-     ((fun _ -> Ok ()), status_info_to_yojson))
-  | Connection_info ->
-    (((fun () -> `Null), connection_info_of_yojson),
-     ((fun _ -> Ok ()), connection_info_to_yojson))
-  | Page_loaded ->
-    ((page_loaded_request_to_yojson, (fun _ -> Ok ())),
-     (page_loaded_request_of_yojson, (fun () -> `Null)))
-  | Lookup ->
-    ((lookup_request_to_yojson, lookup_results_of_yojson),
-     (lookup_request_of_yojson, lookup_results_to_yojson))
-  | Import_history ->
-    let entries_to_yojson entries =
-      `List (List.map entries ~f:history_entry_to_yojson)
-    in
-    let entries_of_yojson = function
-      | `List items ->
-        List.map items ~f:history_entry_of_yojson |> Result.all
-      | _ -> Error "import_history: expected list"
-    in
-    let int_of_yojson = function
-      | `Int n -> Ok n
-      | _ -> Error "import_history: expected int"
-    in
-    ((entries_to_yojson, int_of_yojson),
-     (entries_of_yojson, (fun n -> `Int n)))
-  | Delete_history ->
-    let urls_to_yojson urls =
-      `List (List.map urls ~f:(fun s -> `String s))
-    in
-    let urls_of_yojson = function
-      | `List items ->
-        List.map items ~f:(function
-          | `String s -> Ok s
-          | _ -> Error "delete_history: expected string")
-        |> Result.all
-      | _ -> Error "delete_history: expected list"
-    in
-    let int_of_yojson = function
-      | `Int n -> Ok n
-      | _ -> Error "delete_history: expected int"
-    in
-    ((urls_to_yojson, int_of_yojson),
-     (urls_of_yojson, (fun n -> `Int n)))
-  | Get_exclude_patterns ->
-    (((fun () -> `Null), exclude_patterns_of_yojson),
-     ((fun _ -> Ok ()), exclude_patterns_to_yojson))
-  | Set_exclude_patterns ->
-    let patterns_of_yojson = function
-      | `List items ->
-        List.map items ~f:(function
-          | `String s -> Ok s
-          | _ -> Error "set_exclude_patterns: expected string")
-        |> Result.all
-      | _ -> Error "set_exclude_patterns: expected list"
-    in
-    let patterns_to_yojson patterns =
-      `List (List.map patterns ~f:(fun s -> `String s))
-    in
-    ((patterns_to_yojson, (fun _ -> Ok ())),
-     (patterns_of_yojson, (fun () -> `Null)))
+type ('req, 'resp) codec = {
+  serialize_request : 'req -> Yojson.Safe.t;
+  deserialize_response : Yojson.Safe.t -> ('resp, string) Result.t;
+  deserialize_request : Yojson.Safe.t -> ('req, string) Result.t;
+  serialize_response : 'resp -> Yojson.Safe.t;
+}
 
-let request_serializer cmd = fst (fst (command_codec cmd))
-let response_deserializer cmd = snd (fst (command_codec cmd))
-let request_deserializer cmd = fst (snd (command_codec cmd))
-let response_serializer cmd = snd (snd (command_codec cmd))
+let command_codec : type req resp. (req, resp) command -> (req, resp) codec = function
+  | Register -> {
+      serialize_request = register_request_to_yojson;
+      deserialize_response = (fun payload -> match payload with
+        | `String s -> Ok s
+        | _ -> Error "register: expected string");
+      deserialize_request = register_request_of_yojson;
+      serialize_response = (fun s -> `String s);
+    }
+  | Open -> {
+      serialize_request = open_request_to_yojson;
+      deserialize_response = route_result_of_yojson;
+      deserialize_request = open_request_of_yojson;
+      serialize_response = route_result_to_yojson;
+    }
+  | Open_on -> {
+      serialize_request = open_on_request_to_yojson;
+      deserialize_response = route_result_of_yojson;
+      deserialize_request = open_on_request_of_yojson;
+      serialize_response = route_result_to_yojson;
+    }
+  | Test -> {
+      serialize_request = open_request_to_yojson;
+      deserialize_response = test_result_of_yojson;
+      deserialize_request = open_request_of_yojson;
+      serialize_response = test_result_to_yojson;
+    }
+  | Get_config -> {
+      serialize_request = (fun () -> `Null);
+      deserialize_response = config_of_yojson;
+      deserialize_request = (fun _ -> Ok ());
+      serialize_response = config_to_yojson;
+    }
+  | Set_config -> {
+      serialize_request = config_to_yojson;
+      deserialize_response = (fun _ -> Ok ());
+      deserialize_request = config_of_yojson;
+      serialize_response = (fun () -> `Null);
+    }
+  | Get_rules -> {
+      serialize_request = (fun () -> `Null);
+      deserialize_response = rules_of_yojson;
+      deserialize_request = (fun _ -> Ok ());
+      serialize_response = rules_to_yojson;
+    }
+  | Set_rules -> {
+      serialize_request = rules_to_yojson;
+      deserialize_response = (fun _ -> Ok ());
+      deserialize_request = rules_of_yojson;
+      serialize_response = (fun () -> `Null);
+    }
+  | Status -> {
+      serialize_request = (fun () -> `Null);
+      deserialize_response = status_info_of_yojson;
+      deserialize_request = (fun _ -> Ok ());
+      serialize_response = status_info_to_yojson;
+    }
+  | Connection_info -> {
+      serialize_request = (fun () -> `Null);
+      deserialize_response = connection_info_of_yojson;
+      deserialize_request = (fun _ -> Ok ());
+      serialize_response = connection_info_to_yojson;
+    }
+  | Page_loaded -> {
+      serialize_request = page_loaded_request_to_yojson;
+      deserialize_response = (fun _ -> Ok ());
+      deserialize_request = page_loaded_request_of_yojson;
+      serialize_response = (fun () -> `Null);
+    }
+  | Lookup -> {
+      serialize_request = lookup_request_to_yojson;
+      deserialize_response = lookup_results_of_yojson;
+      deserialize_request = lookup_request_of_yojson;
+      serialize_response = lookup_results_to_yojson;
+    }
+  | Import_history -> {
+      serialize_request = history_entries_to_yojson;
+      deserialize_response = count_of_yojson;
+      deserialize_request = history_entries_of_yojson;
+      serialize_response = count_to_yojson;
+    }
+  | Delete_history -> {
+      serialize_request = url_list_to_yojson;
+      deserialize_response = count_of_yojson;
+      deserialize_request = url_list_of_yojson;
+      serialize_response = count_to_yojson;
+    }
+  | Get_exclude_patterns -> {
+      serialize_request = (fun () -> `Null);
+      deserialize_response = exclude_patterns_of_yojson;
+      deserialize_request = (fun _ -> Ok ());
+      serialize_response = exclude_patterns_to_yojson;
+    }
+  | Set_exclude_patterns -> {
+      serialize_request = exclude_patterns_to_yojson;
+      deserialize_response = (fun _ -> Ok ());
+      deserialize_request = exclude_patterns_of_yojson;
+      serialize_response = (fun () -> `Null);
+    }
+
+let request_serializer cmd = (command_codec cmd).serialize_request
+let response_deserializer cmd = (command_codec cmd).deserialize_response
+let request_deserializer cmd = (command_codec cmd).deserialize_request
+let response_serializer cmd = (command_codec cmd).serialize_response
 
 let make_request_frame : type req resp. (req, resp) command -> req -> int -> json frame =
   fun cmd request correlation_id ->
