@@ -152,12 +152,16 @@ let create_option (doc : Dom_html.document Js.t) ~value ~text ~selected =
 
 (* -- Port-based Client connection for popup pages -- *)
 
-let connect_port ~on_ready ~on_event =
+let connect_port ~on_ready ~on_disconnect ~on_event =
   Lwt.async (fun () ->
     Lwt.catch
       (fun () ->
         let* (conn, push_stream) = Multiplexer.create_client () in
         on_ready conn;
+        Lwt.async (fun () ->
+          let* () = Client.closed conn in
+          on_disconnect ();
+          Lwt.return_unit);
         let rec forward () =
           let* p = Lwt_stream.next push_stream in
           on_event p;
@@ -167,4 +171,5 @@ let connect_port ~on_ready ~on_event =
       (fun exn ->
         Chrome_api.log (Printf.sprintf "connect_port: error: %s"
           (Base.Exn.to_string exn));
+        on_disconnect ();
         Lwt.return_unit))

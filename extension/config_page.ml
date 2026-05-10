@@ -551,4 +551,7 @@ let () =
     ~on_ready:(fun conn ->
       conn_ref := Some conn;
       fetch_config ())
+    ~on_disconnect:(fun () ->
+      conn_ref := None;
+      set_status false)
     ~on_event:(fun _p -> ())

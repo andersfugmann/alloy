@@ -108,4 +108,6 @@ let () =
                     (Printf.sprintf "Error fetching rules: %s" msg);
                   Lwt.return_unit
                 end)))
+    ~on_disconnect:(fun () ->
+      Page_util.set_text error_div "Disconnected")
     ~on_event:(fun _p -> ())

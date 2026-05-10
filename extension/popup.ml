@@ -155,6 +155,13 @@ let load_tenants conn =
       end;
       Lwt.return_unit))
 
+let show_disconnected () =
+  set_status false "Disconnected";
+  Page_util.set_html tenant_list
+    {|<li style="color:#5f6368">Not connected</li>|};
+  Page_util.set_disabled btn_add_rule true;
+  Page_util.set_disabled btn_delete_rule true
+
 (* -- Entry point -- *)
 
 let () =
@@ -206,4 +213,5 @@ let () =
       Page_util.on_click (Page_util.get_by_id "btnConfig") (fun () ->
         Page_util.create_tab (Page_util.get_extension_url "config.html");
         Dom_html.window##close))
+    ~on_disconnect:show_disconnected
     ~on_event:(fun _p -> ())
