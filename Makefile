@@ -17,7 +17,8 @@ _build/node_modules/.stamp: extension/package.json
 	cd _build && npm install --no-package-lock --quiet
 	@touch $@
 
-deps: _build/node_modules/.stamp ## Install node dependencies
+deps: _build/node_modules/.stamp ## Install opam and node dependencies
+	opam install . --deps-only --with-test --yes
 
 test-extension: build _build/node_modules/.stamp ## Build and run extension tests
 	cd extension && NODE_PATH=../_build/node_modules ../_build/node_modules/.bin/jest --forceExit

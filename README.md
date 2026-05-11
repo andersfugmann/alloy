@@ -2,7 +2,9 @@
 
 URL routing for Linux desktops. A daemon on the host routes URLs between
 isolated browser instances in different tenants (the host itself, or
-systemd-nspawn containers), identified by hostname.
+systemd-nspawn containers), identified by hostname. A Chromium-based
+browser extension (Chrome, Chromium, Edge, and other Chrome-compatible
+browsers) wires each browser into the daemon.
 
 ## Features
 
@@ -10,10 +12,12 @@ systemd-nspawn containers), identified by hostname.
   (host or containers).
 - On-demand browser launch for unregistered target tenants.
 - Shared browsing history collected from every tenant, with cross-tenant
-  search from the extension side panel. Firefox history can be imported
+  search from the extension side panel. The extension can import the
+  browser's own history. Firefox history can be imported
   via `alloy import-firefox`.
-- Browser extension (Chromium / Edge) with popup, options page, history
-  side panel, and context-menu actions for routing and rule management.
+- Browser extension (Chrome-based browsers) with popup, options page,
+  history side panel, and context-menu actions for routing and rule
+  management.
 - CLI and `xdg`-compatible desktop entry so Alloy can be set as the
   default browser.
 
@@ -89,37 +93,11 @@ ensure the container's network can reach the host on the configured port
 
 The daemon reads `~/.config/alloy/config.json` (or a path given as its
 first argument). Routing rules live in a separate file,
-`~/.config/alloy/rules.json`. See [`config.example.json`](config.example.json)
-and [`rules.example.json`](rules.example.json).
+`~/.config/alloy/rules.json`. Use
+[`config.example.json`](config.example.json) and
+[`rules.example.json`](rules.example.json) as starting points.
 
 ### `config.json`
-
-```json
-{
-  "listen": [
-    { "host": "127.0.0.1", "port": 7120 },
-    { "host": "::1", "port": 7120 }
-  ],
-  "allowed_networks": ["127.0.0.0/8", "::1/128"],
-  "tenants": {
-    "host-machine": {
-      "label": "Host",
-      "color": "#4285F4",
-      "brand": "Google Chrome"
-    },
-    "work-container": {
-      "browser_cmd": "machinectl shell work-container /usr/bin/chromium",
-      "label": "Work",
-      "color": "#EA4335"
-    }
-  },
-  "defaults": {
-    "unmatched": "local",
-    "cooldown_seconds": 2,
-    "browser_launch_timeout": 10
-  }
-}
-```
 
 | Field | Description |
 |-------|-------------|
@@ -132,17 +110,11 @@ and [`rules.example.json`](rules.example.json).
 
 ### `rules.json`
 
-```json
-[
-  { "pattern": "https://github[.]com/.*", "target": "work-container", "enabled": true },
-  { "pattern": "https://mail[.]google[.]com/.*", "target": "host-machine", "enabled": true }
-]
-```
-
-Rules are regex patterns evaluated top-to-bottom; the first enabled
-match wins. Both files can be edited directly or modified through the
-extension (config and rules views, plus the *Add routing rule* and
-*Delete matching rule* context-menu items).
+A JSON array of `{ pattern, target, enabled }` objects. Patterns are
+regexes evaluated top-to-bottom; the first enabled match wins. Both
+files can be edited directly or modified through the extension (config
+and rules views, plus the *Add routing rule* and *Delete matching rule*
+context-menu items).
 
 ## Usage
 
@@ -213,8 +185,8 @@ Right-click context menus provide quick routing actions:
 ## Building from Source
 
 ```bash
-opam install . --deps-only --with-test
-cd extension && npm install && cd ..
+make deps
+make build
 ```
 
 A `Makefile` wraps the common `dune` and packaging invocations. Run
