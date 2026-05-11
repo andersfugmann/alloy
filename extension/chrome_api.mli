@@ -66,6 +66,9 @@ end
 module Web_navigation : sig
   val on_before_navigate : (string -> int -> int -> unit) -> unit
   val on_completed : (string -> int -> int -> unit) -> unit
+  val on_committed :
+    (string -> int -> int -> transition_qualifiers:string list -> unit) ->
+    unit
 end
 
 module Web_request : sig

@@ -5,6 +5,7 @@ function createMock() {
   const listeners = {
     onBeforeNavigate: [],
     onNavigationCompleted: [],
+    onNavigationCommitted: [],
     onContextMenuClicked: [],
     onInstalled: [],
     onStartup: [],
@@ -87,6 +88,9 @@ function createMock() {
       onCompleted: {
         addListener: jest.fn((cb) => listeners.onNavigationCompleted.push(cb)),
       },
+      onCommitted: {
+        addListener: jest.fn((cb) => listeners.onNavigationCommitted.push(cb)),
+      },
     },
     webRequest: {
       onCompleted: {
@@ -136,6 +140,13 @@ function triggerNavigation(listeners, url, tabId, frameId) {
   );
 }
 
+// Simulate a commit event (fires for the final URL, including after redirects)
+function triggerCommitted(listeners, url, tabId, frameId, transitionQualifiers) {
+  listeners.onNavigationCommitted.forEach((cb) =>
+    cb({ url, tabId, frameId, transitionQualifiers: transitionQualifiers || [] })
+  );
+}
+
 // Simulate a native port message arriving
 function triggerPortMessage(port, msg) {
   port._msgListeners.forEach((cb) => cb(msg));
@@ -165,6 +176,7 @@ function connectSubPort(listeners) {
 module.exports = {
   createMock,
   triggerNavigation,
+  triggerCommitted,
   triggerPortMessage,
   triggerPortDisconnect,
   connectSubPort,

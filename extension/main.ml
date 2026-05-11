@@ -274,6 +274,19 @@ let register_chrome_listeners () =
       match frame_id with
       | 0 -> handle_navigation url tab_id
       | _ -> ());
+  Chrome_api.Web_navigation.on_committed (fun url tab_id frame_id
+        ~transition_qualifiers ->
+    match frame_id with
+    | 0 ->
+      let is_redirect =
+        List.exists transition_qualifiers ~f:(fun q ->
+          String.equal q "server_redirect"
+          || String.equal q "client_redirect")
+      in
+      (match is_redirect with
+       | true -> handle_navigation url tab_id
+       | false -> ())
+    | _ -> ());
   Chrome_api.Web_request.on_completed (fun url tab_id status_code ->
     handle_request_completed url tab_id status_code);
   Chrome_api.Web_navigation.on_completed (fun url tab_id frame_id ->

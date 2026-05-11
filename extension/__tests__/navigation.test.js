@@ -1,6 +1,7 @@
 const {
   createMock,
   triggerNavigation,
+  triggerCommitted,
   triggerPortMessage,
   triggerPortDisconnect,
 } = require("./chrome_mock");
@@ -70,6 +71,48 @@ describe("navigation interception", () => {
     expect(mock.chrome.tabs.create).toHaveBeenCalledWith({
       url: "https://pushed.example.com",
     });
+  });
+
+  test("re-routes on commit after a server redirect", () => {
+    const port = mock.ports[0];
+    port.postMessage.mockClear();
+    triggerCommitted(mock.listeners, "https://final.example.com", 1, 0, [
+      "server_redirect",
+    ]);
+
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+    const msg = port.postMessage.mock.calls[0][0];
+    expect(msg.payload).toHaveProperty("command", "open");
+    expect(msg.payload.params).toEqual({ url: "https://final.example.com" });
+  });
+
+  test("re-routes on commit after a client redirect", () => {
+    const port = mock.ports[0];
+    port.postMessage.mockClear();
+    triggerCommitted(mock.listeners, "https://final.example.com", 1, 0, [
+      "client_redirect",
+    ]);
+
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(port.postMessage.mock.calls[0][0].payload.command).toBe("open");
+  });
+
+  test("ignores commit without redirect qualifier", () => {
+    const port = mock.ports[0];
+    port.postMessage.mockClear();
+    triggerCommitted(mock.listeners, "https://example.com", 1, 0, ["from_address_bar"]);
+
+    expect(port.postMessage).not.toHaveBeenCalled();
+  });
+
+  test("ignores commit on sub-frame", () => {
+    const port = mock.ports[0];
+    port.postMessage.mockClear();
+    triggerCommitted(mock.listeners, "https://example.com", 1, 1, [
+      "server_redirect",
+    ]);
+
+    expect(port.postMessage).not.toHaveBeenCalled();
   });
 
   test("does not send commands when disconnected", async () => {

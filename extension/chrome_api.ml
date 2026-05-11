@@ -299,6 +299,14 @@ module Web_navigation = struct
     method frameId : int Js.readonly_prop
   end
 
+  class type commit_details = object
+    method url : Js.js_string Js.t Js.readonly_prop
+    method tabId : int Js.readonly_prop
+    method frameId : int Js.readonly_prop
+    method transitionQualifiers :
+      Js.js_string Js.t Js.js_array Js.t Js.Optdef.t Js.readonly_prop
+  end
+
   let on_before_navigate f =
     add_listener (nav ()) "onBeforeNavigate"
       (inject
@@ -310,6 +318,23 @@ module Web_navigation = struct
       (inject
          (Js.wrap_callback (fun (details : nav_details Js.t) ->
               f (Js.to_string details##.url) details##.tabId details##.frameId)))
+
+  let on_committed f =
+    add_listener (nav ()) "onCommitted"
+      (inject
+         (Js.wrap_callback (fun (details : commit_details Js.t) ->
+              let qualifiers =
+                Js.Optdef.case details##.transitionQualifiers
+                  (fun () -> [])
+                  (fun arr ->
+                     let len = arr##.length in
+                     List.init len ~f:(fun i ->
+                       Js.Optdef.case (Js.array_get arr i)
+                         (fun () -> "")
+                         Js.to_string))
+              in
+              f (Js.to_string details##.url) details##.tabId
+                details##.frameId ~transition_qualifiers:qualifiers)))
 end
 
 (* ── Web Request ─────────────────────────────────────────────────── *)
