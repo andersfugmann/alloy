@@ -50,4 +50,8 @@
   (ppx_inline_test
    (and
     :with-test
-    (>= v0.17)))))
+    (>= v0.17)))
+  (alcotest-lwt
+   (and
+    :with-test
+    (>= 1.7)))))
