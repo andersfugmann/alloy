@@ -40,7 +40,7 @@
 ## Commit Messages
 
 - Keep commit messages short and focused on the feature or behaviour being delivered, not implementation details.
-- Include the initial prompt that motivated the work as part of the commit message body.
+- Include a oneliner for of the initial prompt that motivated the work as part of the commit message body.
 
 ## Pre-commit Checks
 
