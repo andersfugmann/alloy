@@ -17,17 +17,6 @@ jobs:
         with:
           ocaml-compiler: "5"
 
-      - name: Prime opam download cache (workaround for upstream outages)
-        run: |
-          # Some upstream source hosts (e.g. gitlab.inria.fr) occasionally go
-          # into maintenance and serve a stub page instead of the real tarball.
-          # Pre-populate opam's download cache from opam.ocaml.org so the
-          # checksum matches even when the primary URL is unavailable.
-          mkdir -p ~/.opam/download-cache/md5/e9
-          curl -sL --retry 3 \
-            "https://opam.ocaml.org/cache/md5/e9/e993231085db95ab011ffe0cd606d9dd" \
-            -o ~/.opam/download-cache/md5/e9/e993231085db95ab011ffe0cd606d9dd || true
-
       - name: Install dependencies
         run: opam install . --deps-only --with-test
 
