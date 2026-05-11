@@ -36,17 +36,6 @@ jobs:
         with:
           ocaml-compiler: "5"
 
-      - name: Prime opam download cache (workaround for upstream outages)
-        run: |
-          # gitlab.inria.fr (which hosts menhir) occasionally goes into
-          # maintenance and serves a stub page. Pre-populate opam's
-          # download cache from opam.ocaml.org so the install succeeds
-          # without contacting the primary source.
-          mkdir -p ~/.opam/download-cache/md5/e9
-          curl -sL --retry 3 \
-            "https://opam.ocaml.org/cache/md5/e9/e993231085db95ab011ffe0cd606d9dd" \
-            -o ~/.opam/download-cache/md5/e9/e993231085db95ab011ffe0cd606d9dd || true
-
       - name: Install dependencies
         run: |
           opam install . --deps-only
