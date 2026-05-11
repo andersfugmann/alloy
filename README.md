@@ -1,58 +1,43 @@
 # Alloy
 
 URL routing for Linux desktops. A daemon on the host routes URLs between
-isolated browser instances in different tenants (host or systemd-nspawn
-containers), identified by hostname.
+isolated browser instances in different tenants (the host itself, or
+systemd-nspawn containers), identified by hostname.
 
-## How It Works
+## Features
 
-```mermaid
-graph TB
-    subgraph "Tenant A"
-        A_EXT["Browser Extension"] <-->|"Native messaging<br/>(JSON)"| A_BRIDGE["alloy"]
-    end
+- Rule-based URL routing between browser profiles in different tenants
+  (host or containers).
+- On-demand browser launch for unregistered target tenants.
+- Shared browsing history collected from every tenant, with cross-tenant
+  search from the extension side panel. Firefox history can be imported
+  via `alloy import-firefox`.
+- Browser extension (Chromium / Edge) with popup, options page, history
+  side panel, and context-menu actions for routing and rule management.
+- CLI and `xdg`-compatible desktop entry so Alloy can be set as the
+  default browser.
 
-    subgraph "Host"
-        DAEMON["alloyd<br/>─────────────────<br/>Rule engine<br/>Tenant registry<br/>Cooldown map"]
-    end
+## Server (alloyd)
 
-    subgraph "Tenant B"
-        B_BRIDGE["alloy"] <-->|"Native messaging<br/>(JSON)"| B_EXT["Browser Extension"]
-    end
+`alloyd` is the host-side daemon. It listens on one or more TCP addresses
+(loopback by default) and accepts two kinds of connections:
 
-    A_BRIDGE <-->|"TCP<br/>(line protocol)"| DAEMON
-    DAEMON <-->|"TCP<br/>(line protocol)"| B_BRIDGE
-```
+- *Registered* connections, opened by the per-tenant bridge on startup.
+  These are long-lived and read-only from the client side; the daemon
+  pushes `NAVIGATE` messages on them when a URL should open in that
+  tenant.
+- *Command* connections, used for one-shot requests (open a URL, query
+  status, read or update configuration and rules).
 
-```mermaid
-sequenceDiagram
-    participant ExtA as Extension (Tenant A)
-    participant BridgeA as Bridge (Tenant A)
-    participant Daemon as alloyd (Host)
-    participant BridgeB as Bridge (Tenant B)
-    participant ExtB as Extension (Tenant B)
+The daemon owns the tenant registry, the cooldown map, and the
+configuration and rules files. When a URL arrives, it evaluates the
+ordered rule list, resolves the target tenant, and either keeps the URL
+local (responding `LOCAL`) or pushes it to the target tenant's
+registered connection (responding `REMOTE`). If the target tenant is
+not registered, the daemon can launch its browser via the configured
+`browser_cmd` and wait for it to register.
 
-    Note over BridgeA,BridgeB: Bridges register on startup
-    BridgeA->>Daemon: REGISTER tenant-a Google Chrome
-    BridgeB->>Daemon: REGISTER tenant-b Microsoft Edge
-
-    ExtA->>BridgeA: Open url
-    Note over BridgeA: Injects hostname
-    BridgeA->>Daemon: OPEN tenant-a url
-
-    Note over Daemon: Check cooldown → evaluate rules
-
-    Daemon->>BridgeB: NAVIGATE url
-    BridgeB->>ExtB: Push Navigate url
-    Note over ExtB: Opens new tab
-
-    Daemon-->>BridgeA: REMOTE tenant-b
-    BridgeA-->>ExtA: Response Ok_route tenant-b
-    Note over ExtA: Closes tab
-```
-
-After routing, the daemon suppresses the same (tenant, URL) pair for a
-configurable cooldown window to prevent redirect loops.
+See [SPEC.md](SPEC.md) for the full protocol specification.
 
 ## Installation
 
@@ -92,7 +77,10 @@ ensure the container's network can reach the host on the configured port
 
 ```json
 {
-  "listen": ["0.0.0.0:7120", "[::]:7120"],
+  "listen": [
+    { "host": "0.0.0.0", "port": 7120 },
+    { "host": "::", "port": 7120 }
+  ],
   "allowed_networks": ["127.0.0.0/8", "::1/128", "10.0.0.0/8"]
 }
 ```
@@ -100,22 +88,34 @@ ensure the container's network can reach the host on the configured port
 ## Configuration
 
 The daemon reads `~/.config/alloy/config.json` (or a path given as its
-first argument). See [`config.example.json`](config.example.json).
+first argument). Routing rules live in a separate file,
+`~/.config/alloy/rules.json`. See [`config.example.json`](config.example.json)
+and [`rules.example.json`](rules.example.json).
+
+### `config.json`
 
 ```json
 {
-  "listen": ["127.0.0.1:7120", "[::1]:7120"],
+  "listen": [
+    { "host": "127.0.0.1", "port": 7120 },
+    { "host": "::1", "port": 7120 }
+  ],
   "allowed_networks": ["127.0.0.0/8", "::1/128"],
   "tenants": {
-    "host-machine": { "browser_cmd": "chromium", "label": "Host", "color": "#4285F4" },
-    "work-container": { "browser_cmd": "machinectl shell work -- chromium", "label": "Work", "color": "#EA4335" }
+    "host-machine": {
+      "label": "Host",
+      "color": "#4285F4",
+      "brand": "Google Chrome"
+    },
+    "work-container": {
+      "browser_cmd": "machinectl shell work-container /usr/bin/chromium",
+      "label": "Work",
+      "color": "#EA4335"
+    }
   },
-  "rules": [
-    { "pattern": "https://github[.]com/.*", "target": "work-container", "enabled": true }
-  ],
   "defaults": {
     "unmatched": "local",
-    "cooldown_seconds": 5,
+    "cooldown_seconds": 2,
     "browser_launch_timeout": 10
   }
 }
@@ -123,38 +123,40 @@ first argument). See [`config.example.json`](config.example.json).
 
 | Field | Description |
 |-------|-------------|
-| `listen` | List of `host:port` addresses to listen on (default `["127.0.0.1:7120", "[::1]:7120"]`). |
+| `listen` | List of `{ host, port }` records to listen on (default loopback IPv4 and IPv6 on port 7120). |
 | `allowed_networks` | CIDR list of networks allowed to connect (default loopback only). |
-| `tenants` | Hostname → `{ browser_cmd, label, color, brand? }`. Keys must match actual hostnames. `brand` is optional and auto-populated on registration. |
-| `rules` | Regex patterns, evaluated top-to-bottom. First match wins. |
+| `tenants` | Hostname to `{ browser_cmd?, label, color, brand? }`. Keys must match actual hostnames. `brand` is optional and auto-populated on registration. `browser_cmd` is only needed for tenants the daemon should be able to launch (typically containers). |
 | `defaults.unmatched` | `"local"` or a tenant hostname for unmatched URLs. |
 | `defaults.cooldown_seconds` | Suppress repeated (tenant, URL) routing within this window. |
-| `defaults.browser_launch_timeout` | Seconds to wait for browser registration after `browser_cmd`. |
+| `defaults.browser_launch_timeout` | Seconds to wait for browser registration after running `browser_cmd`. |
 
-Configuration can also be modified via the extension context menu or the
-CLI (`get-config`, `set-config`, `add-rule`, `update-rule`,
-`delete-rule`).
+### `rules.json`
+
+```json
+[
+  { "pattern": "https://github[.]com/.*", "target": "work-container", "enabled": true },
+  { "pattern": "https://mail[.]google[.]com/.*", "target": "host-machine", "enabled": true }
+]
+```
+
+Rules are regex patterns evaluated top-to-bottom; the first enabled
+match wins. Both files can be edited directly or modified through the
+extension (config and rules views, plus the *Add routing rule* and
+*Delete matching rule* context-menu items).
 
 ## Usage
 
 ### CLI
 
 ```bash
-alloy open <url>                   # Route via rules
-alloy open-on <tenant> <url>       # Route to specific tenant
-alloy test <url>                   # Dry-run rule evaluation
-alloy status                       # Registered tenants, uptime
-alloy get-config                   # Print config as JSON
-alloy set-config <json-file>       # Replace config
-alloy add-rule '<json>'            # Append rule
-alloy update-rule <index> '<json>' # Update rule
-alloy delete-rule <index>          # Delete rule
+alloy open <url>              # Route a URL through the daemon
+alloy import-firefox          # Import Firefox history into Alloy
 ```
 
-Address defaults to `127.0.0.1:7120` (override with
-`--address`/`-a`).
+Connection defaults to `127.0.0.1:7120`. Override with `--host`/`-H`
+and `--port`/`-p`.
 
-To set as the default URL handler:
+To set Alloy as the default URL handler:
 
 ```bash
 xdg-settings set default-web-browser alloy.desktop
@@ -215,17 +217,10 @@ opam install . --deps-only --with-test
 cd extension && npm install && cd ..
 ```
 
-| Target | Description |
-|--------|-------------|
-| `make build` | `dune build @all` |
-| `make test` | `dune runtest` |
-| `make test-extension` | Jest tests for the extension |
-| `make lint` | `dune build @check` |
-| `make fmt` | `dune fmt` |
-| `make deb VERSION=x.y.z` | Build `.deb` packages (requires `fakeroot`, `debhelper`) |
-| `make clean` | Remove build artifacts |
+A `Makefile` wraps the common `dune` and packaging invocations. Run
+`make help` for the list of available targets.
 
-`debian/rules` calls `dune build --profile release` for optimized output.
+`debian/rules` calls `dune build --profile release` for optimised output.
 
 ## License
 
