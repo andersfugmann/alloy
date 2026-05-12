@@ -55,10 +55,12 @@ install: ## Install via dune
 VERSION ?= 0.0.0
 
 deb: ## Build debian packages (VERSION=x.y.z)
-	sed -i "1s/([^)]*)/($(VERSION))/" debian/changelog
-	sed -i 's/"version": "[^"]*"/"version": "$(VERSION)"/' extension/manifest.json
-	dpkg-buildpackage -us -uc -b -d
+	sed --in-place='.orig' "1s/([^)]*)/($(VERSION))/" debian/changelog
+	sed --in-place='.orig' 's/"version": "[^"]*"/"version": "$(VERSION)"/' extension/manifest.json
+	dpkg-buildpackage -us -uc -b -d -nc
 	@mkdir -p _build/deb
 	mv ../alloyd_$(VERSION)_*.deb _build/deb/
 	mv ../alloy_$(VERSION)_*.deb _build/deb/
+	mv -f debian/changelog.orig debian/changelog
+	mv -f extension/manifest.json.orig extension/manifest.json
 	@echo "Built packages in _build/deb/"
