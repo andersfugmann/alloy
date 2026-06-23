@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+
+cleanup_obsolete_system_unit() {
+	if [ -n "${DPKG_ROOT:-}" ]; then
+		return
+	fi
+
+	if command -v systemctl >/dev/null; then
+		systemctl --system stop alloyd.service >/dev/null 2>&1 || true
+		systemctl --system disable alloyd.service >/dev/null 2>&1 || true
+		systemctl --system reset-failed alloyd.service >/dev/null 2>&1 || true
+	fi
+
+	remove_obsolete_want /etc/systemd/system/default.target.wants/alloyd.service
+	remove_obsolete_want /etc/systemd/system/graphical.target.wants/alloyd.service
+	remove_obsolete_want /etc/systemd/system/multi-user.target.wants/alloyd.service
+
+	if command -v deb-systemd-helper >/dev/null; then
+		deb-systemd-helper purge alloyd.service >/dev/null 2>&1 || true
+	fi
+
+	if command -v systemctl >/dev/null; then
+		systemctl --system daemon-reload >/dev/null 2>&1 || true
+	fi
+}
+
+remove_obsolete_want() {
+	path="$1"
+
+	if [ ! -L "$path" ]; then
+		return
+	fi
+
+	case "$(readlink "$path")" in
+		/usr/lib/systemd/system/alloyd.service|/lib/systemd/system/alloyd.service)
+			rm -f "$path"
+			;;
+	esac
+}
+
+case "$1" in
+	configure|abort-upgrade|abort-deconfigure|abort-remove)
+		cleanup_obsolete_system_unit
+		;;
+esac
+
+#DEBHELPER#
